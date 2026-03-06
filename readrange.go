@@ -45,3 +45,39 @@ func ReadRange(ctx context.Context, recipe *SnapshotRecipe, store BlockStore, of
 
 	return result, nil
 }
+
+// PatchedReadRange reads a byte range from a file, applying any patches
+// from the PatchIndex in timestamp order (LWW semantics).
+func PatchedReadRange(ctx context.Context, recipe *SnapshotRecipe, store BlockStore, patches *PatchIndex, fileID string, offset, length uint64) ([]byte, error) {
+	result, err := ReadRange(ctx, recipe, store, offset, length)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, patch := range patches.Patches(fileID) {
+		applyPatch(result, offset, length, patch, store, ctx)
+	}
+
+	return result, nil
+}
+
+func applyPatch(buf []byte, rangeOffset, rangeLength uint64, patch patchEntry, store BlockStore, ctx context.Context) {
+	patchEnd := patch.Offset + patch.Size
+	rangeEnd := rangeOffset + rangeLength
+
+	overlapStart := max(patch.Offset, rangeOffset)
+	overlapEnd := min(patchEnd, rangeEnd)
+	if overlapStart >= overlapEnd {
+		return
+	}
+
+	patchData, err := store.Get(ctx, patch.DataHash)
+	if err != nil {
+		return // skip patches with missing data (not yet replicated)
+	}
+
+	srcOffset := overlapStart - patch.Offset
+	dstOffset := overlapStart - rangeOffset
+	copyLen := overlapEnd - overlapStart
+	copy(buf[dstOffset:dstOffset+copyLen], patchData[srcOffset:srcOffset+copyLen])
+}

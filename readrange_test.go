@@ -55,6 +55,110 @@ func TestReadRangePartial(t *testing.T) {
 	}
 }
 
+func TestPatchedReadRange(t *testing.T) {
+	store, _ := NewFSBlockStore(t.TempDir())
+	index := New("w1")
+	patches := NewPatchIndex("w1")
+	chunker := NewChunker(DefaultChunkerConfig())
+	ctx := context.Background()
+
+	// Write a file
+	data := make([]byte, 20*1024)
+	rand.Read(data)
+	recipe, _, err := WriteSnapshot(ctx, "file-a", bytes.NewReader(data), chunker, store, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a patch at offset 1000: overwrite 10 bytes
+	patchData := []byte("XXXXXXXXXX")
+	_, err = WritePatch(ctx, "w1", "file-a", 1000, patchData, store, patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read patched region
+	got, err := PatchedReadRange(ctx, recipe, store, patches, "file-a", 995, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First 5 bytes should be original data
+	if !bytes.Equal(got[:5], data[995:1000]) {
+		t.Error("pre-patch bytes mismatch")
+	}
+	// Next 10 bytes should be patch data
+	if !bytes.Equal(got[5:15], patchData) {
+		t.Error("patched bytes mismatch")
+	}
+	// Last 5 bytes should be original data
+	if !bytes.Equal(got[15:], data[1010:1015]) {
+		t.Error("post-patch bytes mismatch")
+	}
+}
+
+func TestPatchedReadRangeOverlapping(t *testing.T) {
+	store, _ := NewFSBlockStore(t.TempDir())
+	index := New("w1")
+	patches := NewPatchIndex("w1")
+	chunker := NewChunker(DefaultChunkerConfig())
+	ctx := context.Background()
+
+	data := make([]byte, 10*1024)
+	rand.Read(data)
+	recipe, _, err := WriteSnapshot(ctx, "file-a", bytes.NewReader(data), chunker, store, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Earlier patch: write "AAAA" at offset 100
+	_, err = WritePatch(ctx, "w1", "file-a", 100, []byte("AAAA"), store, patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Later patch: write "BB" at offset 102 (overlaps with first patch)
+	_, err = WritePatch(ctx, "w1", "file-a", 102, []byte("BB"), store, patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read the patched region
+	got, err := PatchedReadRange(ctx, recipe, store, patches, "file-a", 100, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Expected: "AA" from first patch, then "BB" from second (overwrites positions 102-103)
+	if string(got) != "AABB" {
+		t.Errorf("expected AABB, got %q", string(got))
+	}
+}
+
+func TestPatchedReadRangeNoPatches(t *testing.T) {
+	store, _ := NewFSBlockStore(t.TempDir())
+	index := New("w1")
+	patches := NewPatchIndex("w1")
+	chunker := NewChunker(DefaultChunkerConfig())
+	ctx := context.Background()
+
+	data := make([]byte, 10*1024)
+	rand.Read(data)
+	recipe, _, err := WriteSnapshot(ctx, "file-a", bytes.NewReader(data), chunker, store, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read without any patches — should match original
+	got, err := PatchedReadRange(ctx, recipe, store, patches, "file-a", 500, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data[500:600]) {
+		t.Fatal("unpatched read mismatch")
+	}
+}
+
 func TestReadRangeSpansChunks(t *testing.T) {
 	store, _ := NewFSBlockStore(t.TempDir())
 	index := New("w1")
