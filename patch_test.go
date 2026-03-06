@@ -3,6 +3,7 @@ package tessera
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"testing"
 )
 
@@ -117,5 +118,78 @@ func TestWritePatch(t *testing.T) {
 	}
 	if patches[0].Offset != 100 || patches[0].Size != uint64(len(patchData)) {
 		t.Errorf("unexpected patch: %+v", patches[0])
+	}
+}
+
+func TestPatchLifecycle(t *testing.T) {
+	store, _ := NewFSBlockStore(t.TempDir())
+	index := New("w1")
+	patches1 := NewPatchIndex("w1")
+	patches2 := NewPatchIndex("w2")
+	chunker := NewChunker(DefaultChunkerConfig())
+	ctx := context.Background()
+
+	// Write a file
+	original := make([]byte, 40*1024)
+	rand.Read(original)
+	recipe, _, err := WriteSnapshot(ctx, "file-a", bytes.NewReader(original), chunker, store, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker 1 patches at offset 5000
+	patch1Data := []byte("WORKER1_PATCH")
+	d1, err := WritePatch(ctx, "w1", "file-a", 5000, patch1Data, store, patches1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker 2 patches at offset 10000 (non-overlapping)
+	patch2Data := []byte("WORKER2_PATCH")
+	d2, err := WritePatch(ctx, "w2", "file-a", 10000, patch2Data, store, patches2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Replicate: each gets the other's delta
+	patches1.Merge(d2)
+	patches2.Merge(d1)
+
+	// Both replicas should read the same patched file
+	totalSize := TotalSize(recipe.Blocks)
+	read1, err := PatchedReadRange(ctx, recipe, store, patches1, "file-a", 0, totalSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read2, err := PatchedReadRange(ctx, recipe, store, patches2, "file-a", 0, totalSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(read1, read2) {
+		t.Fatal("replicas diverge after patch sync")
+	}
+
+	// Verify patches are applied correctly
+	if !bytes.Equal(read1[5000:5000+len(patch1Data)], patch1Data) {
+		t.Error("patch1 not applied")
+	}
+	if !bytes.Equal(read1[10000:10000+len(patch2Data)], patch2Data) {
+		t.Error("patch2 not applied")
+	}
+
+	// Flatten
+	newRecipe, _, err := Flatten(ctx, "file-a", recipe, store, index, patches1, chunker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read from new recipe (no patches) should match patched read
+	flatData, err := ReadRange(ctx, newRecipe, store, 0, TotalSize(newRecipe.Blocks))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(flatData, read1) {
+		t.Fatal("flattened data doesn't match patched read")
 	}
 }
