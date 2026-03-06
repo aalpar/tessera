@@ -61,3 +61,65 @@ func TestBlockRefDeltaRemoveRoundTrip(t *testing.T) {
 		t.Error("hash-abc should be unreferenced after remove")
 	}
 }
+
+func TestAppendRecipeDeltaRoundTrip(t *testing.T) {
+	ar := NewAppendRecipe("w1")
+	delta := ar.Append("hash-xyz", 1000)
+
+	var buf bytes.Buffer
+	if err := EncodeAppendRecipeDelta(&buf, delta); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := DecodeAppendRecipeDelta(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Merge into fresh replica and verify
+	ar2 := NewAppendRecipe("w2")
+	ar2.Merge(got)
+
+	hashes := ar2.Read()
+	if len(hashes) != 1 || hashes[0] != "hash-xyz" {
+		t.Errorf("expected [hash-xyz], got %v", hashes)
+	}
+}
+
+func TestAppendRecipeMultiDeltaRoundTrip(t *testing.T) {
+	ar1 := NewAppendRecipe("w1")
+	d1 := ar1.Append("hash-a", 100)
+	d2 := ar1.Append("hash-b", 200)
+
+	// Encode both deltas
+	var buf1, buf2 bytes.Buffer
+	if err := EncodeAppendRecipeDelta(&buf1, d1); err != nil {
+		t.Fatal(err)
+	}
+	if err := EncodeAppendRecipeDelta(&buf2, d2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Decode and merge into fresh replica
+	dec1, err := DecodeAppendRecipeDelta(&buf1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec2, err := DecodeAppendRecipeDelta(&buf2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ar2 := NewAppendRecipe("w2")
+	ar2.Merge(dec1)
+	ar2.Merge(dec2)
+
+	hashes := ar2.Read()
+	if len(hashes) != 2 {
+		t.Fatalf("expected 2 hashes, got %d", len(hashes))
+	}
+	// Read() returns sorted by timestamp, so hash-a (ts=100) first
+	if hashes[0] != "hash-a" || hashes[1] != "hash-b" {
+		t.Errorf("expected [hash-a, hash-b], got %v", hashes)
+	}
+}
