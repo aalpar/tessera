@@ -22,9 +22,9 @@
   - `Flatten` — re-chunk patched files into clean recipes
   - PatchIndex delta serialization
   - Integration test — full lifecycle with replication
+- [x] Patch GC — CompactFile: flatten + remove patches + deregister old block refs
 
 ## Next
-- [ ] Patch GC — remove flattened patches from PatchIndex, clean up old chunk refs
 - [ ] Ring membership CRDT — track which workers are active participants
 - [ ] Checkpoint + truncate — snapshot full state, discard old deltas
 - [ ] S3 BlockStore backend
