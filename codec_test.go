@@ -2,6 +2,7 @@ package tessera
 
 import (
 	"bytes"
+	"context"
 	"testing"
 )
 
@@ -121,5 +122,44 @@ func TestAppendRecipeMultiDeltaRoundTrip(t *testing.T) {
 	// Read() returns sorted by timestamp, so hash-a (ts=100) first
 	if hashes[0] != "hash-a" || hashes[1] != "hash-b" {
 		t.Errorf("expected [hash-a, hash-b], got %v", hashes)
+	}
+}
+
+func TestPatchIndexDeltaRoundTrip(t *testing.T) {
+	store, _ := NewFSBlockStore(t.TempDir())
+	pi := NewPatchIndex("w1")
+	ctx := context.Background()
+
+	_, err := WritePatch(ctx, "w1", "file-a", 100, []byte("hello"), store, pi)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get the delta by adding another patch
+	delta, err := WritePatch(ctx, "w1", "file-a", 200, []byte("world"), store, pi)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := EncodePatchIndexDelta(&buf, delta); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := DecodePatchIndexDelta(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Merge into fresh replica
+	pi2 := NewPatchIndex("w2")
+	pi2.Merge(got)
+
+	patches := pi2.Patches("file-a")
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch from delta, got %d", len(patches))
+	}
+	if patches[0].Offset != 200 {
+		t.Errorf("expected offset 200, got %d", patches[0].Offset)
 	}
 }
