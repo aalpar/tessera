@@ -1,6 +1,9 @@
 package tessera
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
 	"slices"
 	"testing"
 
@@ -172,5 +175,203 @@ func assertRefs(t *testing.T, idx *BlockRef, contentHash string, expected []stri
 	slices.Sort(expected)
 	if !slices.Equal(got, expected) {
 		t.Errorf("Refs(%q) = %v, want %v", contentHash, got, expected)
+	}
+}
+
+// TestEndToEndBackupDedupGC exercises the full pipeline:
+//
+//  1. Two workers share a BlockStore
+//  2. Worker-1 backs up a file (Chunker → BlockStore → SnapshotRecipe → BlockRef)
+//  3. Worker-2 backs up a similar file (expect dedup — shared blocks)
+//  4. Sync deltas between workers
+//  5. Delete one file, run GC after dominance check
+//  6. Verify: surviving file reads back correctly, deleted file's unique blocks are swept
+func TestEndToEndBackupDedupGC(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewFSBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunker := NewChunker(DefaultChunkerConfig())
+
+	// Create two workers sharing the same BlockStore.
+	w1 := NewWorker("worker-1")
+	w2 := NewWorker("worker-2")
+
+	// Create test data: fileA and fileB share the first 32KB.
+	fileA := make([]byte, 64*1024)
+	rand.Read(fileA)
+	fileB := make([]byte, 64*1024)
+	copy(fileB, fileA[:32*1024])
+	rand.Read(fileB[32*1024:])
+
+	// Step 1: Worker-1 backs up fileA.
+	recipeA, deltasA, err := WriteSnapshot(ctx, "file-A", bytes.NewReader(fileA), chunker, store, w1.Index())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 2: Worker-2 backs up fileB.
+	recipeB, deltasB, err := WriteSnapshot(ctx, "file-B", bytes.NewReader(fileB), chunker, store, w2.Index())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify dedup: some blocks should be shared.
+	setA := make(map[string]bool)
+	for _, h := range recipeA.Blocks {
+		setA[h] = true
+	}
+	shared := 0
+	for _, h := range recipeB.Blocks {
+		if setA[h] {
+			shared++
+		}
+	}
+	if shared == 0 {
+		t.Fatal("expected shared blocks between files with common prefix")
+	}
+	t.Logf("dedup: %d blocks shared between fileA (%d blocks) and fileB (%d blocks)",
+		shared, len(recipeA.Blocks), len(recipeB.Blocks))
+
+	// Step 3: Sync deltas between workers.
+	for _, d := range deltasB {
+		w1.Sync(d)
+	}
+	for _, d := range deltasA {
+		w2.Sync(d)
+	}
+
+	// Step 4: Verify both files read back correctly.
+	gotA, err := ReadSnapshot(ctx, recipeA, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotA, fileA) {
+		t.Fatal("fileA round-trip mismatch")
+	}
+
+	gotB, err := ReadSnapshot(ctx, recipeB, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotB, fileB) {
+		t.Fatal("fileB round-trip mismatch")
+	}
+
+	// Step 5: Delete fileA.
+	// We need to remove all block refs and the recipe ref.
+	allHashesA := append(recipeA.Blocks, recipeA.Version)
+	deleteDeltas := w1.DeleteFile("file-A", allHashesA)
+	w2.Sync(deleteDeltas...)
+
+	// Step 6: GC.
+	// Build GC context by merging both workers' contexts.
+	gcIndex := New("gc")
+	for _, d := range deltasA {
+		gcIndex.Merge(d)
+	}
+	for _, d := range deltasB {
+		gcIndex.Merge(d)
+	}
+	for _, d := range deleteDeltas {
+		gcIndex.Merge(d)
+	}
+
+	if !Dominates(gcIndex.Context(), []*dotcontext.CausalContext{w1.Context(), w2.Context()}) {
+		t.Fatal("GC should dominate after seeing all worker events")
+	}
+
+	swept := Sweep(gcIndex)
+
+	// Blocks unique to fileA should be swept.
+	// Shared blocks should NOT be swept (still referenced by fileB).
+	for _, h := range swept {
+		if setA[h] {
+			// This is a block that was in fileA. Check if it's also in fileB.
+			for _, bh := range recipeB.Blocks {
+				if bh == h {
+					t.Fatalf("block %s is shared with fileB but was swept", h)
+				}
+			}
+		}
+	}
+
+	// FileB should still read back correctly.
+	gotB2, err := ReadSnapshot(ctx, recipeB, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotB2, fileB) {
+		t.Fatal("fileB should still be readable after GC")
+	}
+
+	t.Logf("GC swept %d blocks after fileA deletion", len(swept))
+}
+
+// TestEndToEndAppendStream exercises two workers appending to the same
+// logical stream and reading back in timestamp order.
+func TestEndToEndAppendStream(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewFSBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunker := NewChunker(DefaultChunkerConfig())
+
+	r1 := NewAppendRecipe("w1")
+	r2 := NewAppendRecipe("w2")
+	index := New("shared")
+
+	// Worker 1 appends a chunk at t=100.
+	data1 := []byte("entry from worker 1")
+	var chunks1 []Chunk
+	for c := range chunker.Chunks(bytes.NewReader(data1)) {
+		chunks1 = append(chunks1, c)
+	}
+	for _, c := range chunks1 {
+		if err := store.Put(ctx, c.Hash, c.Data); err != nil {
+			t.Fatal(err)
+		}
+		index.AddRef(c.Hash, "stream-1")
+	}
+	d1 := r1.Append(chunks1[0].Hash, 100)
+
+	// Worker 2 appends a chunk at t=50 (earlier timestamp, but appended later).
+	data2 := []byte("entry from worker 2")
+	var chunks2 []Chunk
+	for c := range chunker.Chunks(bytes.NewReader(data2)) {
+		chunks2 = append(chunks2, c)
+	}
+	for _, c := range chunks2 {
+		if err := store.Put(ctx, c.Hash, c.Data); err != nil {
+			t.Fatal(err)
+		}
+		index.AddRef(c.Hash, "stream-1")
+	}
+	d2 := r2.Append(chunks2[0].Hash, 50)
+
+	// Sync.
+	r1.Merge(d2)
+	r2.Merge(d1)
+
+	// Both should read in timestamp order: w2's entry (t=50) before w1's (t=100).
+	h1 := r1.Read()
+	h2 := r2.Read()
+
+	if len(h1) != 2 || len(h2) != 2 {
+		t.Fatalf("expected 2 entries, got r1=%d r2=%d", len(h1), len(h2))
+	}
+	if h1[0] != chunks2[0].Hash || h1[1] != chunks1[0].Hash {
+		t.Fatalf("r1: unexpected order: %v", h1)
+	}
+	assertSliceEqual(t, "append-stream", h1, h2)
+
+	// Verify we can read back the actual data from the store.
+	for _, hash := range h1 {
+		_, err := store.Get(ctx, hash)
+		if err != nil {
+			t.Fatalf("block %s not found in store: %v", hash, err)
+		}
 	}
 }

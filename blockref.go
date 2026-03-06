@@ -23,7 +23,7 @@ type BlockRef struct {
 func New(replicaID string) *BlockRef {
 	return &BlockRef{
 		inner: ormap.New[string, *dotcontext.DotMap[string, *dotcontext.DotSet]](
-			replicaID,
+			dotcontext.ReplicaID(replicaID),
 			joinInner,
 			emptyInner,
 		),
@@ -32,7 +32,7 @@ func New(replicaID string) *BlockRef {
 
 // AddRef records that fileID references contentHash and returns a delta.
 func (b *BlockRef) AddRef(contentHash, fileID string) *BlockRef {
-	delta := b.inner.Apply(contentHash, func(id string, ctx *dotcontext.CausalContext, v *dotcontext.DotMap[string, *dotcontext.DotSet], delta *dotcontext.DotMap[string, *dotcontext.DotSet]) {
+	delta := b.inner.Apply(contentHash, func(id dotcontext.ReplicaID, ctx *dotcontext.CausalContext, v *dotcontext.DotMap[string, *dotcontext.DotSet], delta *dotcontext.DotMap[string, *dotcontext.DotSet]) {
 		d := ctx.Next(id)
 
 		// Update local state: add dot to this file's dot set.
@@ -56,7 +56,7 @@ func (b *BlockRef) AddRef(contentHash, fileID string) *BlockRef {
 // The delta carries no store entries but its context records the removed
 // dots — so concurrent adds (with new, unobserved dots) survive the merge.
 func (b *BlockRef) RemoveRef(contentHash, fileID string) *BlockRef {
-	delta := b.inner.Apply(contentHash, func(id string, ctx *dotcontext.CausalContext, v *dotcontext.DotMap[string, *dotcontext.DotSet], delta *dotcontext.DotMap[string, *dotcontext.DotSet]) {
+	delta := b.inner.Apply(contentHash, func(id dotcontext.ReplicaID, ctx *dotcontext.CausalContext, v *dotcontext.DotMap[string, *dotcontext.DotSet], delta *dotcontext.DotMap[string, *dotcontext.DotSet]) {
 		v.Delete(fileID)
 	})
 	return &BlockRef{inner: delta}
