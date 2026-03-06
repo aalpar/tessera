@@ -1,6 +1,7 @@
 package tessera
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -105,25 +106,11 @@ func WritePatch(ctx context.Context, replicaID, fileID string, offset uint64, da
 }
 
 func comparePatchEntries(a, b patchEntry) int {
-	if a.Timestamp != b.Timestamp {
-		if a.Timestamp < b.Timestamp {
-			return -1
-		}
-		return 1
-	}
-	if a.ReplicaID != b.ReplicaID {
-		if a.ReplicaID < b.ReplicaID {
-			return -1
-		}
-		return 1
-	}
-	if a.Seq != b.Seq {
-		if a.Seq < b.Seq {
-			return -1
-		}
-		return 1
-	}
-	return 0
+	return cmp.Or(
+		cmp.Compare(a.Timestamp, b.Timestamp),
+		cmp.Compare(a.ReplicaID, b.ReplicaID),
+		cmp.Compare(a.Seq, b.Seq),
+	)
 }
 
 func joinPatchInner(
