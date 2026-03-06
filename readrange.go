@@ -55,29 +55,32 @@ func PatchedReadRange(ctx context.Context, recipe *SnapshotRecipe, store BlockSt
 	}
 
 	for _, patch := range patches.Patches(fileID) {
-		applyPatch(result, offset, length, patch, store, ctx)
+		if err := applyPatch(ctx, result, offset, length, patch, store); err != nil {
+			return nil, fmt.Errorf("patched read %s: %w", fileID, err)
+		}
 	}
 
 	return result, nil
 }
 
-func applyPatch(buf []byte, rangeOffset, rangeLength uint64, patch patchEntry, store BlockStore, ctx context.Context) {
+func applyPatch(ctx context.Context, buf []byte, rangeOffset, rangeLength uint64, patch patchEntry, store BlockStore) error {
 	patchEnd := patch.Offset + patch.Size
 	rangeEnd := rangeOffset + rangeLength
 
 	overlapStart := max(patch.Offset, rangeOffset)
 	overlapEnd := min(patchEnd, rangeEnd)
 	if overlapStart >= overlapEnd {
-		return
+		return nil
 	}
 
 	patchData, err := store.Get(ctx, patch.DataHash)
 	if err != nil {
-		return // skip patches with missing data (not yet replicated)
+		return fmt.Errorf("patch %s offset %d: %w", patch.DataHash, patch.Offset, err)
 	}
 
 	srcOffset := overlapStart - patch.Offset
 	dstOffset := overlapStart - rangeOffset
 	copyLen := overlapEnd - overlapStart
 	copy(buf[dstOffset:dstOffset+copyLen], patchData[srcOffset:srcOffset+copyLen])
+	return nil
 }
