@@ -219,12 +219,12 @@ func TestEndToEndBackupDedupGC(t *testing.T) {
 
 	// Verify dedup: some blocks should be shared.
 	setA := make(map[string]bool)
-	for _, h := range recipeA.Blocks {
-		setA[h] = true
+	for _, b := range recipeA.Blocks {
+		setA[b.Hash] = true
 	}
 	shared := 0
-	for _, h := range recipeB.Blocks {
-		if setA[h] {
+	for _, b := range recipeB.Blocks {
+		if setA[b.Hash] {
 			shared++
 		}
 	}
@@ -261,7 +261,11 @@ func TestEndToEndBackupDedupGC(t *testing.T) {
 
 	// Step 5: Delete fileA.
 	// We need to remove all block refs and the recipe ref.
-	allHashesA := append(recipeA.Blocks, recipeA.Version)
+	allHashesA := make([]string, 0, len(recipeA.Blocks)+1)
+	for _, b := range recipeA.Blocks {
+		allHashesA = append(allHashesA, b.Hash)
+	}
+	allHashesA = append(allHashesA, recipeA.Version)
 	deleteDeltas := w1.DeleteFile("file-A", allHashesA)
 	w2.Sync(deleteDeltas...)
 
@@ -289,8 +293,8 @@ func TestEndToEndBackupDedupGC(t *testing.T) {
 	for _, h := range swept {
 		if setA[h] {
 			// This is a block that was in fileA. Check if it's also in fileB.
-			for _, bh := range recipeB.Blocks {
-				if bh == h {
+			for _, b := range recipeB.Blocks {
+				if b.Hash == h {
 					t.Fatalf("block %s is shared with fileB but was swept", h)
 				}
 			}

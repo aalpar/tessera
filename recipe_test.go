@@ -64,8 +64,8 @@ func TestSnapshotRecipeDedup(t *testing.T) {
 	}
 
 	// Both files reference the same blocks.
-	for _, hash := range r1.Blocks {
-		refs := index.Refs(hash)
+	for _, block := range r1.Blocks {
+		refs := index.Refs(block.Hash)
 		hasA, hasB := false, false
 		for _, r := range refs {
 			if r == "file-a" {
@@ -76,20 +76,23 @@ func TestSnapshotRecipeDedup(t *testing.T) {
 			}
 		}
 		if !hasA || !hasB {
-			t.Fatalf("block %s: expected refs from both files, got %v", hash, refs)
+			t.Fatalf("block %s: expected refs from both files, got %v", block.Hash, refs)
 		}
 	}
 }
 
 func TestSnapshotRecipeSerialization(t *testing.T) {
-	blocks := []string{
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	blocks := []Block{
+		{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 1024},
+		{Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Size: 2048},
 	}
 	r := NewSnapshotRecipe("test-file", blocks)
 
 	data := r.Serialize()
-	r2 := DeserializeSnapshotRecipe("test-file", data)
+	r2, err := DeserializeSnapshotRecipe("test-file", data)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if r.Version != r2.Version {
 		t.Fatalf("version mismatch: %s vs %s", r.Version, r2.Version)
@@ -98,8 +101,11 @@ func TestSnapshotRecipeSerialization(t *testing.T) {
 		t.Fatalf("block count mismatch: %d vs %d", len(r2.Blocks), len(blocks))
 	}
 	for i := range blocks {
-		if r2.Blocks[i] != blocks[i] {
-			t.Fatalf("block %d mismatch", i)
+		if r2.Blocks[i].Hash != blocks[i].Hash {
+			t.Fatalf("block %d hash mismatch", i)
+		}
+		if r2.Blocks[i].Size != blocks[i].Size {
+			t.Fatalf("block %d size mismatch: %d vs %d", i, r2.Blocks[i].Size, blocks[i].Size)
 		}
 	}
 }
@@ -130,12 +136,12 @@ func TestSnapshotRecipePartialDedup(t *testing.T) {
 
 	// Count shared blocks.
 	set1 := make(map[string]bool)
-	for _, h := range r1.Blocks {
-		set1[h] = true
+	for _, b := range r1.Blocks {
+		set1[b.Hash] = true
 	}
 	shared := 0
-	for _, h := range r2.Blocks {
-		if set1[h] {
+	for _, b := range r2.Blocks {
+		if set1[b.Hash] {
 			shared++
 		}
 	}
