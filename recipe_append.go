@@ -85,11 +85,9 @@ func (a *AppendRecipe) Merge(delta *AppendRecipe) {
 }
 
 func compareEntries(a, b appendEntry) int {
-	if c := cmp.Compare(a.Timestamp, b.Timestamp); c != 0 {
-		return c
-	}
-	if c := cmp.Compare(a.ReplicaID, b.ReplicaID); c != 0 {
-		return c
-	}
-	return cmp.Compare(a.Seq, b.Seq)
+	return cmp.Or(
+		cmp.Compare(a.Timestamp, b.Timestamp),
+		cmp.Compare(a.ReplicaID, b.ReplicaID),
+		cmp.Compare(a.Seq, b.Seq),
+	)
 }

@@ -30,7 +30,6 @@ type patchEntry struct {
 // Composition: ORMap[fileID, *DotMap[patchEntry, *DotSet]]
 // Same nesting pattern as BlockRef.
 type PatchIndex struct {
-	id    string
 	seq   uint64
 	inner *ormap.ORMap[string, *dotcontext.DotMap[patchEntry, *dotcontext.DotSet]]
 }
@@ -38,7 +37,6 @@ type PatchIndex struct {
 // NewPatchIndex creates an empty PatchIndex for the given replica.
 func NewPatchIndex(replicaID string) *PatchIndex {
 	return &PatchIndex{
-		id: replicaID,
 		inner: ormap.New[string, *dotcontext.DotMap[patchEntry, *dotcontext.DotSet]](
 			dotcontext.ReplicaID(replicaID),
 			joinPatchInner,
