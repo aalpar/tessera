@@ -64,6 +64,17 @@ func (p *PatchIndex) AddPatch(fileID string, entry patchEntry) *PatchIndex {
 	return &PatchIndex{inner: delta}
 }
 
+// RemovePatches removes specific patch entries for a file and returns a delta.
+// Concurrent adds from other replicas survive (add-wins semantics).
+func (p *PatchIndex) RemovePatches(fileID string, entries []patchEntry) *PatchIndex {
+	delta := p.inner.Apply(fileID, func(id dotcontext.ReplicaID, ctx *dotcontext.CausalContext, v *dotcontext.DotMap[patchEntry, *dotcontext.DotSet], delta *dotcontext.DotMap[patchEntry, *dotcontext.DotSet]) {
+		for _, entry := range entries {
+			v.Delete(entry)
+		}
+	})
+	return &PatchIndex{inner: delta}
+}
+
 // Patches returns all patches for the given file, sorted by
 // (Timestamp, ReplicaID, Seq) for deterministic LWW application.
 func (p *PatchIndex) Patches(fileID string) []patchEntry {

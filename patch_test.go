@@ -192,3 +192,82 @@ func TestPatchLifecycle(t *testing.T) {
 		t.Fatal("flattened data doesn't match patched read")
 	}
 }
+
+func TestRemovePatches(t *testing.T) {
+	pi := NewPatchIndex("w1")
+
+	e1 := patchEntry{Offset: 0, Size: 5, DataHash: "h1", Timestamp: 1, ReplicaID: "w1", Seq: 1}
+	e2 := patchEntry{Offset: 100, Size: 5, DataHash: "h2", Timestamp: 2, ReplicaID: "w1", Seq: 2}
+
+	pi.AddPatch("file-a", e1)
+	pi.AddPatch("file-a", e2)
+
+	if len(pi.Patches("file-a")) != 2 {
+		t.Fatal("expected 2 patches before remove")
+	}
+
+	// Remove only e1
+	delta := pi.RemovePatches("file-a", []patchEntry{e1})
+	if delta == nil {
+		t.Fatal("expected non-nil delta")
+	}
+
+	// e1 gone, e2 remains
+	patches := pi.Patches("file-a")
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch after remove, got %d", len(patches))
+	}
+	if patches[0].DataHash != "h2" {
+		t.Errorf("expected h2 to survive, got %s", patches[0].DataHash)
+	}
+}
+
+func TestRemovePatchesConcurrentAddSurvives(t *testing.T) {
+	pi1 := NewPatchIndex("w1")
+	pi2 := NewPatchIndex("w2")
+
+	// w1 adds P1
+	e1 := patchEntry{Offset: 0, Size: 5, DataHash: "h1", Timestamp: 1, ReplicaID: "w1", Seq: 1}
+	d1 := pi1.AddPatch("file-a", e1)
+	pi2.Merge(d1)
+
+	// w1 removes P1 (simulating post-flatten cleanup)
+	dRemove := pi1.RemovePatches("file-a", []patchEntry{e1})
+
+	// w2 concurrently adds P2 (hasn't seen the remove yet)
+	e2 := patchEntry{Offset: 200, Size: 10, DataHash: "h2", Timestamp: 2, ReplicaID: "w2", Seq: 1}
+	dAdd := pi2.AddPatch("file-a", e2)
+
+	// Sync: each gets the other's delta
+	pi1.Merge(dAdd)
+	pi2.Merge(dRemove)
+
+	// Both should converge: P1 removed, P2 survives
+	for _, pi := range []*PatchIndex{pi1, pi2} {
+		patches := pi.Patches("file-a")
+		if len(patches) != 1 {
+			t.Fatalf("expected 1 patch, got %d", len(patches))
+		}
+		if patches[0].DataHash != "h2" {
+			t.Errorf("expected h2 to survive, got %s", patches[0].DataHash)
+		}
+	}
+}
+
+func TestRemovePatchesAllForFile(t *testing.T) {
+	pi := NewPatchIndex("w1")
+
+	e1 := patchEntry{Offset: 0, Size: 5, DataHash: "h1", Timestamp: 1, ReplicaID: "w1", Seq: 1}
+	e2 := patchEntry{Offset: 100, Size: 5, DataHash: "h2", Timestamp: 2, ReplicaID: "w1", Seq: 2}
+
+	pi.AddPatch("file-a", e1)
+	pi.AddPatch("file-a", e2)
+
+	// Remove both
+	pi.RemovePatches("file-a", []patchEntry{e1, e2})
+
+	patches := pi.Patches("file-a")
+	if len(patches) != 0 {
+		t.Fatalf("expected 0 patches after removing all, got %d", len(patches))
+	}
+}
