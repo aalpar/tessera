@@ -1,7 +1,10 @@
 package tessera
 
 import (
+	"context"
+	"fmt"
 	"slices"
+	"time"
 
 	"github.com/aalpar/crdt/dotcontext"
 	"github.com/aalpar/crdt/ormap"
@@ -25,12 +28,15 @@ type patchEntry struct {
 // Composition: ORMap[fileID, *DotMap[patchEntry, *DotSet]]
 // Same nesting pattern as BlockRef.
 type PatchIndex struct {
+	id    string
+	seq   uint64
 	inner *ormap.ORMap[string, *dotcontext.DotMap[patchEntry, *dotcontext.DotSet]]
 }
 
 // NewPatchIndex creates an empty PatchIndex for the given replica.
 func NewPatchIndex(replicaID string) *PatchIndex {
 	return &PatchIndex{
+		id: replicaID,
 		inner: ormap.New[string, *dotcontext.DotMap[patchEntry, *dotcontext.DotSet]](
 			dotcontext.ReplicaID(replicaID),
 			joinPatchInner,
@@ -73,6 +79,29 @@ func (p *PatchIndex) Patches(fileID string) []patchEntry {
 // Merge incorporates a delta from another PatchIndex.
 func (p *PatchIndex) Merge(delta *PatchIndex) {
 	p.inner.Merge(delta.inner)
+}
+
+// WritePatch stores patch data in the BlockStore and records it in the PatchIndex.
+// Returns a delta for replication.
+func WritePatch(ctx context.Context, replicaID, fileID string, offset uint64, data []byte, store BlockStore, patches *PatchIndex) (*PatchIndex, error) {
+	chunk := newChunk(data)
+	if err := store.Put(ctx, chunk.Hash, chunk.Data); err != nil {
+		return nil, fmt.Errorf("write patch %s offset %d: %w", fileID, offset, err)
+	}
+
+	patches.seq++
+	entry := patchEntry{
+		FileID:    fileID,
+		Offset:    offset,
+		Size:      uint64(len(data)),
+		DataHash:  chunk.Hash,
+		Timestamp: time.Now().UnixMicro(),
+		ReplicaID: replicaID,
+		Seq:       patches.seq,
+	}
+
+	delta := patches.AddPatch(fileID, entry)
+	return delta, nil
 }
 
 func comparePatchEntries(a, b patchEntry) int {

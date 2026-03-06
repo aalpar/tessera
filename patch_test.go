@@ -1,6 +1,8 @@
 package tessera
 
 import (
+	"bytes"
+	"context"
 	"testing"
 )
 
@@ -81,5 +83,39 @@ func TestPatchIndexMergeCommutative(t *testing.T) {
 	p2 := r2.Patches("file-a")
 	if len(p1) != 2 || len(p2) != 2 {
 		t.Errorf("expected 2 patches each, got %d and %d", len(p1), len(p2))
+	}
+}
+
+func TestWritePatch(t *testing.T) {
+	store, _ := NewFSBlockStore(t.TempDir())
+	pi := NewPatchIndex("w1")
+	ctx := context.Background()
+
+	patchData := []byte("hello world")
+	delta, err := WritePatch(ctx, "w1", "file-a", 100, patchData, store, pi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta == nil {
+		t.Fatal("expected non-nil delta")
+	}
+
+	// Patch data should be in BlockStore
+	chunk := newChunk(patchData)
+	got, err := store.Get(ctx, chunk.Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, patchData) {
+		t.Fatal("patch data mismatch in store")
+	}
+
+	// Patch should be in index
+	patches := pi.Patches("file-a")
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch, got %d", len(patches))
+	}
+	if patches[0].Offset != 100 || patches[0].Size != uint64(len(patchData)) {
+		t.Errorf("unexpected patch: %+v", patches[0])
 	}
 }
