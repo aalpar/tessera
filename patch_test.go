@@ -11,7 +11,6 @@ func TestPatchIndexAddAndPatches(t *testing.T) {
 	pi := NewPatchIndex("w1")
 
 	delta := pi.AddPatch("file-a", patchEntry{
-		FileID:    "file-a",
 		Offset:    100,
 		Size:      10,
 		DataHash:  "abc123",
@@ -37,11 +36,11 @@ func TestPatchIndexMultipleFiles(t *testing.T) {
 	pi := NewPatchIndex("w1")
 
 	pi.AddPatch("file-a", patchEntry{
-		FileID: "file-a", Offset: 0, Size: 5, DataHash: "h1",
+		Offset: 0, Size: 5, DataHash: "h1",
 		Timestamp: 1, ReplicaID: "w1", Seq: 1,
 	})
 	pi.AddPatch("file-b", patchEntry{
-		FileID: "file-b", Offset: 0, Size: 5, DataHash: "h2",
+		Offset: 0, Size: 5, DataHash: "h2",
 		Timestamp: 2, ReplicaID: "w1", Seq: 2,
 	})
 
@@ -61,11 +60,11 @@ func TestPatchIndexMergeCommutative(t *testing.T) {
 	pi2 := NewPatchIndex("w2")
 
 	d1 := pi1.AddPatch("file-a", patchEntry{
-		FileID: "file-a", Offset: 0, Size: 5, DataHash: "h1",
+		Offset: 0, Size: 5, DataHash: "h1",
 		Timestamp: 1, ReplicaID: "w1", Seq: 1,
 	})
 	d2 := pi2.AddPatch("file-a", patchEntry{
-		FileID: "file-a", Offset: 100, Size: 5, DataHash: "h2",
+		Offset: 100, Size: 5, DataHash: "h2",
 		Timestamp: 2, ReplicaID: "w2", Seq: 1,
 	})
 

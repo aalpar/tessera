@@ -86,9 +86,6 @@ var appendRecipeCausalCodec = dotcontext.CausalCodec[*dotcontext.DotMap[appendEn
 type patchEntryCodec struct{}
 
 func (patchEntryCodec) Encode(w io.Writer, e patchEntry) error {
-	if err := (dotcontext.StringCodec{}).Encode(w, e.FileID); err != nil {
-		return err
-	}
 	if err := (dotcontext.Uint64Codec{}).Encode(w, e.Offset); err != nil {
 		return err
 	}
@@ -110,10 +107,6 @@ func (patchEntryCodec) Encode(w io.Writer, e patchEntry) error {
 func (patchEntryCodec) Decode(r io.Reader) (patchEntry, error) {
 	var e patchEntry
 	var err error
-	e.FileID, err = (dotcontext.StringCodec{}).Decode(r)
-	if err != nil {
-		return e, err
-	}
 	e.Offset, err = (dotcontext.Uint64Codec{}).Decode(r)
 	if err != nil {
 		return e, err

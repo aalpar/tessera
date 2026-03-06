@@ -14,8 +14,9 @@ import (
 // patchEntry is a byte-range patch applied over chunked file data.
 // Patches are LWW: applied in (Timestamp, ReplicaID, Seq) order on read,
 // later patches overwrite earlier bytes at overlapping offsets.
+//
+// The file identity is not stored here — it's the ORMap outer key.
 type patchEntry struct {
-	FileID    string
 	Offset    uint64 // byte offset in logical file
 	Size      uint64 // length of patch data
 	DataHash  string // content hash of patch data in BlockStore
@@ -92,7 +93,6 @@ func WritePatch(ctx context.Context, replicaID, fileID string, offset uint64, da
 
 	patches.seq++
 	entry := patchEntry{
-		FileID:    fileID,
 		Offset:    offset,
 		Size:      uint64(len(data)),
 		DataHash:  chunk.Hash,
