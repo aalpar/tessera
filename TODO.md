@@ -12,10 +12,9 @@
 - [x] `SnapshotRecipe` — immutable content-addressed file recipes
 - [x] `AppendRecipe` — CRDT-based append-only stream (`AWSet[appendEntry]`)
 - [x] End-to-end integration tests (backup → dedup → GC → read-back, append stream)
+- [x] Delta serialization — wire-encodable deltas for real network transport
 
 ## Next
-
-- [ ] Delta serialization — wire-encodable deltas for real network transport
 - [ ] Ring membership CRDT — track which workers are active participants
 - [ ] Checkpoint + truncate — snapshot full state, discard old deltas
 - [ ] S3 BlockStore backend
