@@ -18,6 +18,11 @@ func NewWorker(replicaID string) *Worker {
 	}
 }
 
+// ID returns the worker's replica ID.
+func (w *Worker) ID() string {
+	return w.id
+}
+
 // BackupFile records that fileID references all given block hashes.
 // Returns one delta per block for replication.
 func (w *Worker) BackupFile(fileID string, blockHashes []string) []*BlockRef {

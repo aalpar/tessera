@@ -24,7 +24,7 @@ func New(replicaID string) *BlockRef {
 	return &BlockRef{
 		inner: ormap.New[string, *dotcontext.DotMap[string, *dotcontext.DotSet]](
 			dotcontext.ReplicaID(replicaID),
-			joinInner,
+			mergeInner,
 			emptyInner,
 		),
 	}
@@ -114,22 +114,12 @@ func (b *BlockRef) Context() *dotcontext.CausalContext {
 	return b.inner.Context()
 }
 
-// joinInner joins two Causal[*DotMap[fileID, *DotSet]] values.
-// This is the recursive join: for each fileID, join the DotSets.
-func joinInner(
-	a, b dotcontext.Causal[*dotcontext.DotMap[string, *dotcontext.DotSet]],
-) dotcontext.Causal[*dotcontext.DotMap[string, *dotcontext.DotSet]] {
-	return dotcontext.JoinDotMap(a, b, joinDotSet, dotcontext.NewDotSet)
+// mergeInner merges two DotMap[fileID, *DotSet] stores in place.
+func mergeInner(state, delta *dotcontext.DotMap[string, *dotcontext.DotSet], ctxState, ctxDelta *dotcontext.CausalContext) {
+	dotcontext.MergeDotMapStore(state, delta, ctxState, ctxDelta, dotcontext.MergeDotSetStore, dotcontext.NewDotSet)
 }
 
 // emptyInner returns a new empty DotMap[fileID, *DotSet].
 func emptyInner() *dotcontext.DotMap[string, *dotcontext.DotSet] {
 	return dotcontext.NewDotMap[string, *dotcontext.DotSet]()
-}
-
-// joinDotSet adapts JoinDotSet to the signature required by JoinDotMap.
-func joinDotSet(
-	a, b dotcontext.Causal[*dotcontext.DotSet],
-) dotcontext.Causal[*dotcontext.DotSet] {
-	return dotcontext.JoinDotSet(a, b)
 }

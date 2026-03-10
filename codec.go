@@ -33,7 +33,7 @@ func DecodeBlockRefDelta(r io.Reader) (*BlockRef, error) {
 		return nil, err
 	}
 	return &BlockRef{
-		inner: ormap.FromCausal(causal, joinInner, emptyInner),
+		inner: ormap.FromCausal(causal, mergeInner, emptyInner),
 	}, nil
 }
 
@@ -155,7 +155,7 @@ func DecodePatchIndexDelta(r io.Reader) (*PatchIndex, error) {
 		return nil, err
 	}
 	return &PatchIndex{
-		inner: ormap.FromCausal(causal, joinPatchInner, emptyPatchInner),
+		inner: ormap.FromCausal(causal, mergePatchInner, emptyPatchInner),
 	}, nil
 }
 

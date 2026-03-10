@@ -39,7 +39,7 @@ func NewPatchIndex(replicaID string) *PatchIndex {
 	return &PatchIndex{
 		inner: ormap.New[string, *dotcontext.DotMap[patchEntry, *dotcontext.DotSet]](
 			dotcontext.ReplicaID(replicaID),
-			joinPatchInner,
+			mergePatchInner,
 			emptyPatchInner,
 		),
 	}
@@ -122,18 +122,10 @@ func comparePatchEntries(a, b patchEntry) int {
 	)
 }
 
-func joinPatchInner(
-	a, b dotcontext.Causal[*dotcontext.DotMap[patchEntry, *dotcontext.DotSet]],
-) dotcontext.Causal[*dotcontext.DotMap[patchEntry, *dotcontext.DotSet]] {
-	return dotcontext.JoinDotMap(a, b, joinPatchDotSet, dotcontext.NewDotSet)
+func mergePatchInner(state, delta *dotcontext.DotMap[patchEntry, *dotcontext.DotSet], ctxState, ctxDelta *dotcontext.CausalContext) {
+	dotcontext.MergeDotMapStore(state, delta, ctxState, ctxDelta, dotcontext.MergeDotSetStore, dotcontext.NewDotSet)
 }
 
 func emptyPatchInner() *dotcontext.DotMap[patchEntry, *dotcontext.DotSet] {
 	return dotcontext.NewDotMap[patchEntry, *dotcontext.DotSet]()
-}
-
-func joinPatchDotSet(
-	a, b dotcontext.Causal[*dotcontext.DotSet],
-) dotcontext.Causal[*dotcontext.DotSet] {
-	return dotcontext.JoinDotSet(a, b)
 }

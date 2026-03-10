@@ -25,7 +25,12 @@
 - [x] Patch GC — CompactFile: flatten + remove patches + deregister old block refs
 
 ## Next
-- [ ] Ring membership CRDT — track which workers are active participants
+- [x] Ring membership CRDT — track which workers are active participants
+  - `Ring` — AWSet[string] composition for dynamic membership
+  - `StalenessTracker` — replication-piggybacked liveness detection
+  - `DominatesRing` — ring-aware GC dominance check
+  - Any peer can evict; add-wins handles false positives
+- [ ] GC sweep after merge — `UnreferencedBlocks()` misses blocks whose references were only removed through merges (`ORMap.Apply` retains empty keys, `ORMap.Merge` cleans them up). Fix via BlockStore `List` method or independent "known blocks" tracking.
 - [ ] Checkpoint + truncate — snapshot full state, discard old deltas
 - [ ] S3 BlockStore backend
 - [ ] Cross-geo replication layer
