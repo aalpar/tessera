@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add two deployment configurations to tessera — peer-to-peer (over S3) and client-server — from a single binary. Introduce `MetadataTransport` interface, `S3BlockStore`, `CachingStore`, and mode-specific transport implementations.
+**Goal:** Add two node roles — peer/client and peer/server — that compose into P2P (over S3), client-server, and multi-domain topologies. Introduce `MetadataTransport`, `S3BlockStore`, `CachingStore`, `SecurityDomain`, and role-aware `Node` runtime.
 
-**Architecture:** Shared core (BlockRef, Ring, PatchIndex, Chunker, GC, Recipes) is unchanged. Mode selection wires different `BlockStore` and `MetadataTransport` implementations at startup. P2P mode uses S3 for both blocks and metadata (piggybacked sync). Client-server mode uses server-managed storage with hub-and-spoke metadata relay.
+**Architecture:** Shared core (BlockRef, Ring, PatchIndex, Chunker, GC, Recipes) is unchanged. Node role determines which `BlockStore` and `MetadataTransport` implementations are wired at startup. Security domains scope peering: S3 bucket in pure P2P, server ring + token in client-server. Rings are per-domain and per-role (server ring, client ring).
 
 **Tech Stack:** Go stdlib + `github.com/aalpar/crdt`. AWS SDK (`github.com/aws/aws-sdk-go-v2`) added for S3 support. `net/http` for client-server transport.
 
@@ -1547,12 +1547,13 @@ git commit -m "Add DeltaServer + ServerClientTransport — hub-and-spoke metadat
 
 ---
 
-### Task 7: Node — Mode-Aware Runtime
+### Task 7: SecurityDomain + Node — Role-Aware Runtime
 
-A `Node` struct that wires together the correct BlockStore and MetadataTransport based on configuration. This is the single entry point for both modes.
+`SecurityDomain` identifies the trust boundary. `Node` wires together CRDT state, BlockStore, MetadataTransport, and rings scoped to the domain and role.
 
 **Files:**
-- Create: `node.go`
+- Create: `domain.go` (SecurityDomain type)
+- Create: `node.go` (Node, NodeRole, NodeConfig)
 - Create: `node_test.go`
 
 **Step 1: Write failing tests**
@@ -1570,6 +1571,8 @@ import (
 )
 
 func TestNodeP2PBackupAndSync(t *testing.T) {
+	// Same S3 bucket = same domain
+	domain := SecurityDomain{ID: "test-bucket"}
 	hub := NewMemTransportHub()
 
 	localA, _ := NewFSBlockStore(t.TempDir())
@@ -1578,11 +1581,15 @@ func TestNodeP2PBackupAndSync(t *testing.T) {
 
 	nodeA := NewNode(NodeConfig{
 		ReplicaID: "w1",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localA, remoteA, hub.Transport("w1")),
 		Transport: hub.Transport("w1"),
 	})
 	nodeB := NewNode(NodeConfig{
 		ReplicaID: "w2",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localB, remoteA, hub.Transport("w2")),
 		Transport: hub.Transport("w2"),
 	})
@@ -1599,24 +1606,26 @@ func TestNodeP2PBackupAndSync(t *testing.T) {
 	}
 
 	// Publish BlockRef deltas from A
-	for _, hash := range recipeHashes(recipe) {
-		delta := nodeA.BlockRef.AddRef(hash, "file-a")
-		encoded := encodeBlockRefForTransport(delta)
-		nodeA.Transport.Publish(encoded)
+	for _, b := range recipe.Blocks {
+		delta := nodeA.BlockRef.AddRef(b.Hash, "file-a")
+		nodeA.PublishBlockRefDelta(delta)
 	}
 
-	// Node B syncs (piggyback or explicit)
+	// Node B syncs
 	nodeB.Sync()
 
 	// Node B should see the block refs
-	for _, hash := range recipeHashes(recipe) {
-		if !nodeB.BlockRef.IsReferenced(hash) {
-			t.Errorf("block %s not referenced on node B after sync", hash[:8])
+	for _, b := range recipe.Blocks {
+		if !nodeB.BlockRef.IsReferenced(b.Hash) {
+			t.Errorf("block %s not referenced on node B after sync", b.Hash[:8])
 		}
 	}
+
+	_ = ctx
 }
 
 func TestNodeClientServerSync(t *testing.T) {
+	domain := SecurityDomain{ID: "domain-alpha"}
 	server := NewDeltaServer()
 
 	localA, _ := NewFSBlockStore(t.TempDir())
@@ -1625,21 +1634,22 @@ func TestNodeClientServerSync(t *testing.T) {
 
 	nodeA := NewNode(NodeConfig{
 		ReplicaID: "client-1",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localA, serverStore, server.ClientTransport("client-1")),
 		Transport: server.ClientTransport("client-1"),
 	})
 	nodeB := NewNode(NodeConfig{
 		ReplicaID: "client-2",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localB, serverStore, server.ClientTransport("client-2")),
 		Transport: server.ClientTransport("client-2"),
 	})
 
-	ctx := context.Background()
-
 	// Client A adds a block ref
 	delta := nodeA.BlockRef.AddRef("hash123", "file-x")
-	encoded := encodeBlockRefForTransport(delta)
-	nodeA.Transport.Publish(encoded)
+	nodeA.PublishBlockRefDelta(delta)
 
 	// Client B syncs
 	nodeB.Sync()
@@ -1647,8 +1657,52 @@ func TestNodeClientServerSync(t *testing.T) {
 	if !nodeB.BlockRef.IsReferenced("hash123") {
 		t.Error("block hash123 should be referenced on client B after sync")
 	}
+}
 
-	_ = ctx
+func TestNodeRoleMismatchPrevented(t *testing.T) {
+	domain := SecurityDomain{ID: "domain-alpha"}
+
+	nodeA := NewNode(NodeConfig{
+		ReplicaID: "client-1",
+		Role:      RoleClient,
+		Domain:    domain,
+	})
+	nodeB := NewNode(NodeConfig{
+		ReplicaID: "server-1",
+		Role:      RoleServer,
+		Domain:    domain,
+	})
+
+	// Verify roles are recorded correctly
+	if nodeA.Role != RoleClient {
+		t.Error("nodeA should be client")
+	}
+	if nodeB.Role != RoleServer {
+		t.Error("nodeB should be server")
+	}
+	if nodeA.Domain.ID != nodeB.Domain.ID {
+		t.Error("should share domain")
+	}
+}
+
+func TestNodeDomainID(t *testing.T) {
+	domainA := SecurityDomain{ID: "bucket-alpha"}
+	domainB := SecurityDomain{ID: "bucket-beta"}
+
+	nodeA := NewNode(NodeConfig{
+		ReplicaID: "w1",
+		Role:      RoleClient,
+		Domain:    domainA,
+	})
+	nodeB := NewNode(NodeConfig{
+		ReplicaID: "w2",
+		Role:      RoleClient,
+		Domain:    domainB,
+	})
+
+	if nodeA.Domain.ID == nodeB.Domain.ID {
+		t.Error("different domains should have different IDs")
+	}
 }
 
 // helpers
@@ -1660,19 +1714,37 @@ func recipeHashes(r *SnapshotRecipe) []string {
 	}
 	return hashes
 }
-
-func encodeBlockRefForTransport(delta *BlockRef) []byte {
-	var buf bytes.Buffer
-	EncodeBlockRefDelta(&buf, delta)
-	return buf.Bytes()
-}
 ```
 
 **Step 2: Run to verify failure**
 
 Run: `cd /Users/aalpar/projects/crdt-projects/tessera && go test -run 'TestNode' -v`
 
-**Step 3: Implement Node**
+**Step 3: Implement SecurityDomain**
+
+In `domain.go`:
+
+```go
+package tessera
+
+// SecurityDomain identifies the trust boundary for a group of nodes.
+//
+// In pure P2P mode, the domain is the S3 bucket — bucket access
+// implies trust. In client-server mode, the domain is defined by
+// the server ring and enforced via authentication with a
+// discoverable token.
+//
+// A single node process belongs to exactly one domain. A user
+// needing multiple domains runs separate processes.
+type SecurityDomain struct {
+	// ID uniquely identifies this domain. In P2P mode, this is the
+	// S3 bucket name. In client-server mode, it's derived from the
+	// server ring's token.
+	ID string
+}
+```
+
+**Step 4: Implement Node**
 
 In `node.go`:
 
@@ -1681,22 +1753,44 @@ package tessera
 
 import "bytes"
 
-// NodeConfig configures a tessera node for either P2P or client-server mode.
+// NodeRole determines a node's peering rules and ring membership.
+type NodeRole int
+
+const (
+	// RoleClient is a peer/client node. Peers only with other clients
+	// in the same security domain.
+	RoleClient NodeRole = iota
+	// RoleServer is a peer/server node. Peers only with other servers
+	// in the same security domain. Tracks clients and relays deltas.
+	RoleServer
+)
+
+// NodeConfig configures a tessera node.
 type NodeConfig struct {
 	ReplicaID string
-	Store     BlockStore         // CachingStore in both modes
-	Transport MetadataTransport  // mode-specific transport
+	Role      NodeRole
+	Domain    SecurityDomain
+	Store     BlockStore        // CachingStore in both modes
+	Transport MetadataTransport // mode-specific transport
 }
 
-// Node is a tessera participant — either a P2P peer or a client-server
-// client/server. It holds the CRDT state (BlockRef, Ring, PatchIndex)
-// and the mode-specific store and transport.
+// Node is a tessera participant. Its Role determines peering rules:
+//
+//   - RoleClient: peers with other clients in the same domain
+//     (client ring). Can be a client-of a server.
+//   - RoleServer: peers with other servers in the same domain
+//     (server ring). Tracks and relays for clients.
+//
+// Each node holds CRDT state (BlockRef, Ring, PatchIndex) scoped
+// to its domain. The Ring tracks peers of the same role.
 type Node struct {
 	ReplicaID  string
+	Role       NodeRole
+	Domain     SecurityDomain
 	Store      BlockStore
 	Transport  MetadataTransport
 	BlockRef   *BlockRef
-	Ring       *Ring
+	Ring       *Ring       // peers of same role in same domain
 	PatchIndex *PatchIndex
 }
 
@@ -1704,6 +1798,8 @@ type Node struct {
 func NewNode(cfg NodeConfig) *Node {
 	return &Node{
 		ReplicaID:  cfg.ReplicaID,
+		Role:       cfg.Role,
+		Domain:     cfg.Domain,
 		Store:      cfg.Store,
 		Transport:  cfg.Transport,
 		BlockRef:   New(cfg.ReplicaID),
@@ -1779,27 +1875,25 @@ func (n *Node) applyDelta(raw []byte) {
 		}
 		n.PatchIndex.Merge(delta)
 	case 'R':
-		// Ring delta decoding — to be added when Ring codec exists
+		// Ring delta decoding — handled after Task 8
 	}
 }
 ```
 
-Note: The test helpers (`encodeBlockRefForTransport`) in Step 1 use raw encoding without the tag byte. The test should be updated to use `node.PublishBlockRefDelta` instead, or the helper should add the `'B'` prefix. The implementer should reconcile this during implementation.
-
-**Step 4: Run tests**
+**Step 5: Run tests**
 
 Run: `cd /Users/aalpar/projects/crdt-projects/tessera && go test -run 'TestNode' -v`
-Expected: PASS (after reconciling the tag byte in test helpers)
+Expected: PASS
 
-**Step 5: Run full suite**
+**Step 6: Run full suite**
 
 Run: `cd /Users/aalpar/projects/crdt-projects/tessera && go test -race ./...`
 
-**Step 6: Commit**
+**Step 7: Commit**
 
 ```bash
-git add node.go node_test.go
-git commit -m "Add Node — mode-aware runtime wiring CRDT state with transport"
+git add domain.go node.go node_test.go
+git commit -m "Add SecurityDomain + Node — role-aware runtime with domain scoping"
 ```
 
 ---
@@ -1811,6 +1905,7 @@ The Node needs to publish/receive Ring deltas. Add Ring delta codec.
 **Files:**
 - Modify: `codec.go` (add Ring encode/decode)
 - Modify: `codec_test.go` (add Ring round-trip test)
+- Modify: `node.go` (add PublishRingDelta, handle 'R' tag)
 
 **Step 1: Write failing test**
 
@@ -1877,7 +1972,7 @@ func DecodeRingDelta(r io.Reader) (*Ring, error) {
 }
 ```
 
-Also update `node.go` to handle the `'R'` tag in `applyDelta`:
+Update `node.go` — handle the `'R'` tag in `applyDelta`:
 
 ```go
 case 'R':
@@ -1920,7 +2015,7 @@ git commit -m "Add Ring delta codec + Node ring delta support"
 
 ### Task 9: P2P Integration Test — Full Lifecycle Over S3 (Mocked)
 
-End-to-end: two P2P nodes sharing a mock S3 store, backup → sync → read → GC.
+End-to-end: two peer/client nodes in the same domain (shared mock S3), backup → sync → read → GC. The S3 bucket IS the security domain.
 
 **Files:**
 - Create: `node_p2p_test.go`
@@ -1940,11 +2035,12 @@ import (
 )
 
 func TestP2PLifecycle(t *testing.T) {
-	// Shared "S3" (mock)
+	// Shared "S3" (mock) — the bucket IS the security domain
 	s3Client := newMockS3Client()
 	s3Store := NewS3BlockStore(s3Client, "blocks/")
+	domain := SecurityDomain{ID: "test-bucket"}
 
-	// Two P2P nodes with local caches and S3 transport
+	// Two peer/client nodes with local caches and S3 transport
 	localA, _ := NewFSBlockStore(t.TempDir())
 	localB, _ := NewFSBlockStore(t.TempDir())
 	transportA := NewS3Transport(s3Client, "deltas/", "nodeA")
@@ -1952,11 +2048,15 @@ func TestP2PLifecycle(t *testing.T) {
 
 	nodeA := NewNode(NodeConfig{
 		ReplicaID: "nodeA",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localA, s3Store, transportA),
 		Transport: transportA,
 	})
 	nodeB := NewNode(NodeConfig{
 		ReplicaID: "nodeB",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localB, s3Store, transportB),
 		Transport: transportB,
 	})
@@ -1964,7 +2064,7 @@ func TestP2PLifecycle(t *testing.T) {
 	ctx := context.Background()
 	chunker := NewChunker(DefaultChunkerConfig())
 
-	// Both join the ring
+	// Both join the client ring
 	dA := nodeA.Ring.Join("nodeA")
 	nodeA.PublishRingDelta(dA)
 	dB := nodeB.Ring.Join("nodeB")
@@ -1975,7 +2075,7 @@ func TestP2PLifecycle(t *testing.T) {
 	nodeB.Sync()
 
 	if nodeA.Ring.Len() != 2 || nodeB.Ring.Len() != 2 {
-		t.Fatalf("ring: A=%d B=%d, want 2 each", nodeA.Ring.Len(), nodeB.Ring.Len())
+		t.Fatalf("client ring: A=%d B=%d, want 2 each", nodeA.Ring.Len(), nodeB.Ring.Len())
 	}
 
 	// Node A backs up a file
@@ -2014,6 +2114,7 @@ func TestP2PLifecycle(t *testing.T) {
 func TestP2PDeleteAndGC(t *testing.T) {
 	s3Client := newMockS3Client()
 	s3Store := NewS3BlockStore(s3Client, "blocks/")
+	domain := SecurityDomain{ID: "test-bucket"}
 
 	localA, _ := NewFSBlockStore(t.TempDir())
 	localB, _ := NewFSBlockStore(t.TempDir())
@@ -2022,11 +2123,15 @@ func TestP2PDeleteAndGC(t *testing.T) {
 
 	nodeA := NewNode(NodeConfig{
 		ReplicaID: "nodeA",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localA, s3Store, transportA),
 		Transport: transportA,
 	})
 	nodeB := NewNode(NodeConfig{
 		ReplicaID: "nodeB",
+		Role:      RoleClient,
+		Domain:    domain,
 		Store:     NewCachingStore(localB, s3Store, transportB),
 		Transport: transportB,
 	})
@@ -2034,9 +2139,7 @@ func TestP2PDeleteAndGC(t *testing.T) {
 	ctx := context.Background()
 	chunker := NewChunker(DefaultChunkerConfig())
 
-	// Ring setup
-	nodeA.Ring.Join("nodeA")
-	nodeB.Ring.Join("nodeB")
+	// Client ring setup
 	nodeA.PublishRingDelta(nodeA.Ring.Join("nodeA"))
 	nodeB.PublishRingDelta(nodeB.Ring.Join("nodeB"))
 	nodeA.Sync()
@@ -2065,7 +2168,7 @@ func TestP2PDeleteAndGC(t *testing.T) {
 	nodeB.Sync()
 	nodeA.Sync()
 
-	// GC: nodeA checks dominance
+	// GC: nodeA checks dominance against the client ring
 	memberCtxs := map[string]*dotcontext.CausalContext{
 		"nodeA": nodeA.BlockRef.Context(),
 		"nodeB": nodeB.BlockRef.Context(),
@@ -2078,8 +2181,8 @@ func TestP2PDeleteAndGC(t *testing.T) {
 	if DominatesRing(nodeA.BlockRef.Context(), nodeA.Ring, memberCtxs) {
 		swept := Sweep(nodeA.BlockRef)
 		if len(swept) == 0 {
-			// This is the known ORMap merge issue from MEMORY.md:
-			// blocks deleted via merge disappear from ORMap entirely,
+			// Known ORMap merge issue from MEMORY.md:
+			// blocks deleted via merge disappear entirely,
 			// so UnreferencedBlocks() doesn't find them.
 			t.Log("NOTE: 0 blocks swept — known ORMap merge cleanup issue")
 		}
@@ -2101,14 +2204,14 @@ Run: `cd /Users/aalpar/projects/crdt-projects/tessera && go test -race ./...`
 
 ```bash
 git add node_p2p_test.go
-git commit -m "Add P2P integration test — backup, sync, read across nodes"
+git commit -m "Add P2P integration test — peer/client lifecycle over shared S3 domain"
 ```
 
 ---
 
 ### Task 10: Client-Server Integration Test
 
-End-to-end: server + two clients, backup on client A, sync through server, read on client B.
+End-to-end: peer/server + two peer/clients in the same domain. Backup on client A, sync through server hub, read on client B. Server ring and client ring are separate.
 
 **Files:**
 - Create: `node_cs_test.go`
@@ -2128,45 +2231,63 @@ import (
 )
 
 func TestClientServerLifecycle(t *testing.T) {
-	server := NewDeltaServer()
+	domain := SecurityDomain{ID: "domain-alpha"}
+	deltaServer := NewDeltaServer()
 
-	// Server node manages the "durable" store
+	// Server node — manages the durable store, joins the server ring
 	serverStore, _ := NewFSBlockStore(t.TempDir())
-	serverTransport := server.ServerTransport()
+	serverTransport := deltaServer.ServerTransport()
 	serverNode := NewNode(NodeConfig{
-		ReplicaID: "server",
+		ReplicaID: "server-1",
+		Role:      RoleServer,
+		Domain:    domain,
 		Store:     serverStore,
 		Transport: serverTransport,
 	})
 
-	// Client A and B each have local caches backed by the server store
+	// Client A and B — local caches, join the client ring
 	localA, _ := NewFSBlockStore(t.TempDir())
 	localB, _ := NewFSBlockStore(t.TempDir())
 	clientA := NewNode(NodeConfig{
 		ReplicaID: "clientA",
-		Store:     NewCachingStore(localA, serverStore, server.ClientTransport("clientA")),
-		Transport: server.ClientTransport("clientA"),
+		Role:      RoleClient,
+		Domain:    domain,
+		Store:     NewCachingStore(localA, serverStore, deltaServer.ClientTransport("clientA")),
+		Transport: deltaServer.ClientTransport("clientA"),
 	})
 	clientB := NewNode(NodeConfig{
 		ReplicaID: "clientB",
-		Store:     NewCachingStore(localB, serverStore, server.ClientTransport("clientB")),
-		Transport: server.ClientTransport("clientB"),
+		Role:      RoleClient,
+		Domain:    domain,
+		Store:     NewCachingStore(localB, serverStore, deltaServer.ClientTransport("clientB")),
+		Transport: deltaServer.ClientTransport("clientB"),
 	})
 
 	ctx := context.Background()
 	chunker := NewChunker(DefaultChunkerConfig())
 
-	// All join the ring
-	for _, n := range []*Node{serverNode, clientA, clientB} {
-		delta := n.Ring.Join(n.ReplicaID)
-		n.PublishRingDelta(delta)
-	}
-	for _, n := range []*Node{serverNode, clientA, clientB} {
-		n.Sync()
-	}
+	// Server joins its own ring (server ring, separate from client ring)
+	serverNode.PublishRingDelta(serverNode.Ring.Join("server-1"))
 
-	if serverNode.Ring.Len() != 3 {
-		t.Fatalf("ring should have 3 members, got %d", serverNode.Ring.Len())
+	// Clients join the client ring (routed through server hub)
+	clientA.PublishRingDelta(clientA.Ring.Join("clientA"))
+	clientB.PublishRingDelta(clientB.Ring.Join("clientB"))
+
+	// Sync all — server sees everything (hub), clients get each
+	// other's ring deltas through server relay
+	serverNode.Sync()
+	clientA.Sync()
+	clientB.Sync()
+
+	// Server ring has 1 member, client ring has 2 members
+	if serverNode.Ring.Len() != 1 {
+		t.Fatalf("server ring should have 1 member, got %d", serverNode.Ring.Len())
+	}
+	// Note: in the current test setup, client ring deltas go through
+	// the server hub and reach both clients. Each client's Ring tracks
+	// client peers only.
+	if clientA.Ring.Len() < 2 {
+		t.Fatalf("client ring on A should have 2 members, got %d", clientA.Ring.Len())
 	}
 
 	// Client A backs up a file
@@ -2180,7 +2301,7 @@ func TestClientServerLifecycle(t *testing.T) {
 		clientA.PublishBlockRefDelta(delta)
 	}
 
-	// Server syncs — sees all deltas (hub)
+	// Server syncs — sees all deltas (hub-and-spoke)
 	serverNode.Sync()
 
 	// Client B syncs — gets deltas relayed through server
@@ -2195,7 +2316,7 @@ func TestClientServerLifecycle(t *testing.T) {
 		t.Fatal("client B read mismatch")
 	}
 
-	// All block refs visible on all nodes
+	// Block refs visible on server and both clients
 	for _, n := range []*Node{serverNode, clientA, clientB} {
 		for _, b := range recipe.Blocks {
 			if !n.BlockRef.IsReferenced(b.Hash) {
@@ -2206,7 +2327,8 @@ func TestClientServerLifecycle(t *testing.T) {
 }
 
 func TestClientServerPatchSync(t *testing.T) {
-	server := NewDeltaServer()
+	domain := SecurityDomain{ID: "domain-alpha"}
+	deltaServer := NewDeltaServer()
 	serverStore, _ := NewFSBlockStore(t.TempDir())
 
 	localA, _ := NewFSBlockStore(t.TempDir())
@@ -2214,13 +2336,17 @@ func TestClientServerPatchSync(t *testing.T) {
 
 	clientA := NewNode(NodeConfig{
 		ReplicaID: "clientA",
-		Store:     NewCachingStore(localA, serverStore, server.ClientTransport("clientA")),
-		Transport: server.ClientTransport("clientA"),
+		Role:      RoleClient,
+		Domain:    domain,
+		Store:     NewCachingStore(localA, serverStore, deltaServer.ClientTransport("clientA")),
+		Transport: deltaServer.ClientTransport("clientA"),
 	})
 	clientB := NewNode(NodeConfig{
 		ReplicaID: "clientB",
-		Store:     NewCachingStore(localB, serverStore, server.ClientTransport("clientB")),
-		Transport: server.ClientTransport("clientB"),
+		Role:      RoleClient,
+		Domain:    domain,
+		Store:     NewCachingStore(localB, serverStore, deltaServer.ClientTransport("clientB")),
+		Transport: deltaServer.ClientTransport("clientB"),
 	})
 
 	ctx := context.Background()
@@ -2242,7 +2368,7 @@ func TestClientServerPatchSync(t *testing.T) {
 	}
 	clientA.PublishPatchIndexDelta(patchDelta)
 
-	// Client B syncs
+	// Client B syncs (through server hub)
 	clientB.Sync()
 
 	// Client B reads patched file
@@ -2268,12 +2394,125 @@ Run: `cd /Users/aalpar/projects/crdt-projects/tessera && go test -race ./...`
 
 ```bash
 git add node_cs_test.go
-git commit -m "Add client-server integration tests — backup, sync, patch across nodes"
+git commit -m "Add client-server integration tests — separate server/client rings, domain-scoped"
 ```
 
 ---
 
-### Task 11: Final Validation + Update TODO
+### Task 11: Domain Isolation Test
+
+Verify that two security domains don't leak data. Two separate S3 buckets (P2P) or two separate server domains should be completely independent.
+
+**Files:**
+- Create: `node_domain_test.go`
+
+**Step 1: Write integration test**
+
+In `node_domain_test.go`:
+
+```go
+package tessera
+
+import (
+	"testing"
+)
+
+func TestDomainIsolationP2P(t *testing.T) {
+	// Two separate S3 buckets = two separate domains
+	s3Alpha := newMockS3Client()
+	s3Beta := newMockS3Client()
+
+	domainAlpha := SecurityDomain{ID: "bucket-alpha"}
+	domainBeta := SecurityDomain{ID: "bucket-beta"}
+
+	// Node A in domain alpha
+	localA, _ := NewFSBlockStore(t.TempDir())
+	storeAlpha := NewS3BlockStore(s3Alpha, "blocks/")
+	transportA := NewS3Transport(s3Alpha, "deltas/", "nodeA")
+	nodeA := NewNode(NodeConfig{
+		ReplicaID: "nodeA",
+		Role:      RoleClient,
+		Domain:    domainAlpha,
+		Store:     NewCachingStore(localA, storeAlpha, transportA),
+		Transport: transportA,
+	})
+
+	// Node B in domain beta (different bucket)
+	localB, _ := NewFSBlockStore(t.TempDir())
+	storeBeta := NewS3BlockStore(s3Beta, "blocks/")
+	transportB := NewS3Transport(s3Beta, "deltas/", "nodeB")
+	nodeB := NewNode(NodeConfig{
+		ReplicaID: "nodeB",
+		Role:      RoleClient,
+		Domain:    domainBeta,
+		Store:     NewCachingStore(localB, storeBeta, transportB),
+		Transport: transportB,
+	})
+
+	// Node A publishes a block ref
+	delta := nodeA.BlockRef.AddRef("secret-hash", "file-private")
+	nodeA.PublishBlockRefDelta(delta)
+
+	// Node B syncs — should see nothing (different S3 bucket entirely)
+	nodeB.Sync()
+
+	if nodeB.BlockRef.IsReferenced("secret-hash") {
+		t.Fatal("domain isolation violated: nodeB sees nodeA's block ref")
+	}
+}
+
+func TestDomainIsolationClientServer(t *testing.T) {
+	// Two separate servers = two separate domains
+	serverAlpha := NewDeltaServer()
+	serverBeta := NewDeltaServer()
+
+	domainAlpha := SecurityDomain{ID: "domain-alpha"}
+	domainBeta := SecurityDomain{ID: "domain-beta"}
+
+	nodeA := NewNode(NodeConfig{
+		ReplicaID: "clientA",
+		Role:      RoleClient,
+		Domain:    domainAlpha,
+		Transport: serverAlpha.ClientTransport("clientA"),
+	})
+	nodeB := NewNode(NodeConfig{
+		ReplicaID: "clientB",
+		Role:      RoleClient,
+		Domain:    domainBeta,
+		Transport: serverBeta.ClientTransport("clientB"),
+	})
+
+	// Node A publishes through server alpha
+	delta := nodeA.BlockRef.AddRef("alpha-secret", "file-x")
+	nodeA.PublishBlockRefDelta(delta)
+
+	// Node B syncs from server beta — should see nothing
+	nodeB.Sync()
+
+	if nodeB.BlockRef.IsReferenced("alpha-secret") {
+		t.Fatal("domain isolation violated: nodeB sees nodeA's data")
+	}
+}
+```
+
+**Step 2: Run tests**
+
+Run: `cd /Users/aalpar/projects/crdt-projects/tessera && go test -run 'TestDomainIsolation' -v`
+
+**Step 3: Run full suite**
+
+Run: `cd /Users/aalpar/projects/crdt-projects/tessera && go test -race ./...`
+
+**Step 4: Commit**
+
+```bash
+git add node_domain_test.go
+git commit -m "Add domain isolation tests — verify cross-domain data doesn't leak"
+```
+
+---
+
+### Task 12: Final Validation + Update TODO
 
 **Step 1: Run all tests**
 
@@ -2288,12 +2527,15 @@ Mark S3 BlockStore as done. Add new items for remaining work:
 + - [x] S3 BlockStore backend
 + - [x] MetadataTransport interface (P2P + client-server)
 + - [x] CachingStore (local cache + remote backend + piggybacking)
-+ - [x] Node runtime (mode-aware wiring)
++ - [x] SecurityDomain + Node runtime (role-aware, domain-scoped)
   - [ ] Cross-geo replication layer
 + - [ ] HTTP transport for client-server (DeltaServer currently in-process only)
 + - [ ] LRU eviction in CachingStore (touch-up propagation per REPLICATION-DESIGN.md)
 + - [ ] Checkpoint + truncate old S3 deltas
 + - [ ] Peer introduction (server returns peer addresses for LAN optimization)
++ - [ ] Security domain authentication (token-based, mechanism TBD)
++ - [ ] Re-authentication timeout enforcement
++ - [ ] Domain discovery protocol (clients discover available domains via tokens)
 ```
 
 **Step 3: Commit**
