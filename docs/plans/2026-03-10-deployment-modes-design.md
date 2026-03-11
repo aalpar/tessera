@@ -1,26 +1,148 @@
 # Deployment Modes Design
 
-Tessera supports two deployment configurations from a single binary:
-**peer-to-peer** (clients in a ring over S3) and **client-server**
-(clients register with servers that manage storage and topology).
+Tessera runs as a single binary with two node roles — **peer/client**
+and **peer/server** — that compose into three relationship types.
 
-## Mode Summary
+## Node Roles and Relationships
 
-| Concern             | P2P                              | Client-Server                        |
-|---------------------|----------------------------------|--------------------------------------|
-| Block storage       | S3 (shared, durable)             | Server-managed (server's choice)     |
-| Local cache         | FSBlockStore (LRU, bounded)      | FSBlockStore (LRU, bounded)          |
-| Metadata transport  | S3 (deltas as objects)           | Server relay (hub-and-spoke)         |
-| Peer discovery      | S3 as rendezvous                 | Server introduces peers              |
-| Ring membership     | Self-managed (any peer)          | CRDT-managed (any peer)              |
-| Control plane       | None                             | Server sets replication parameters   |
-| AWS dependency      | Yes (S3 SDK)                     | No                                   |
+Every tessera node is either a peer/client or a peer/server.
+
+| Relationship | Description |
+|-------------|-------------|
+| peer/client ↔ peer/client | Client ring — equals peer with equals |
+| peer/server ↔ peer/server | Server ring — equals peer with equals |
+| peer/client → peer/server | Client-of — asymmetric, authenticated |
+
+Clients peer only with clients. Servers peer only with servers.
+Clients can be *clients of* servers, but this is a hierarchical
+relationship, not peering.
+
+## Security Domains
+
+A **security domain** is the unit of trust. A node can only peer with
+other nodes in the same security domain.
+
+| Deployment | Domain defined by | Enforcement |
+|------------|-------------------|-------------|
+| Pure P2P (clients only) | The S3 bucket | Implicit — bucket access = trust |
+| With servers | Server ring + discoverable token | Explicit — authentication required |
+
+### Server-Managed Domains
+
+Each server ring defines a security domain with a **discoverable
+token**. A client starting on the network discovers available domains
+by their tokens, then authenticates into one. The authentication
+mechanism is undefined but must guarantee:
+
+1. A rogue client cannot join a server without authorization
+2. A client admitted to a domain can only peer with other clients in
+   that same domain — no transitive leakage
+
+### Re-authentication Timeout
+
+A peer/server configures how long an authenticated client may operate
+without re-authenticating. The timeout units are intentionally
+unspecified (wallclock, sync rounds, operations — left open). On
+expiry, the client must re-authenticate before continuing to peer.
+
+### One Client, One Domain
+
+A single client process belongs to exactly one security domain. A
+user needing multiple domains runs separate client instances.
+
+### Multi-Domain Topology
+
+Servers in different domains have no relationship. Data replicates
+within a domain's server ring but does not cross domain boundaries.
+
+```
+Domain "alpha"                  Domain "beta"
+┌─────────────────────┐        ┌──────────────────┐
+│ S1 ←──peer──→ S2    │        │ S3               │
+│ token: "alpha-xyz"  │        │ token: "beta-abc" │
+│                     │        │                   │
+│ clients: A, B       │        │ clients: C, D     │
+└─────────────────────┘        └──────────────────┘
+
+A and B can peer. C and D can peer. A cannot peer with C.
+S1 replicates with S2. S1 has no relationship with S3.
+```
+
+## Deployment Configurations
+
+### Pure P2P (Clients Only)
+
+```
+┌──────────┐     ┌──────────┐
+│ Client A │←───→│ Client B │   client ring
+│ (cache)  │     │ (cache)  │
+└────┬─────┘     └─────┬────┘
+     │                 │
+     └───────┬─────────┘
+             │
+     ┌───────┴───────┐
+     │   Amazon S3   │             security domain =
+     │  (all blocks  │             the S3 bucket
+     │  + metadata)  │
+     └───────────────┘
+```
+
+No servers. S3 is the durable store for blocks and CRDT metadata.
+Security domain is the S3 bucket (deferred enforcement). Clients
+discover each other through S3.
+
+**Configuration:**
+- S3 bucket (shared block store + metadata channel)
+- Replica ID (self-assigned)
+- Local cache path + size limit
+
+**Wiring:**
+`CachingStore(FSBlockStore, S3BlockStore)` + `S3Transport`
+
+### Client-Server
+
+```
+                    server ring (domain-α)
+     ┌──────────────────────────────┐
+     │                              │
+┌────┴─────┐                  ┌────┴─────┐
+│ Server 1 │←────peer────────→│ Server 2 │
+└────┬─────┘                  └────┬─────┘
+     │ client-of                   │ client-of
+     │                             │
+┌────┴─────┐  ┌──────────┐  ┌────┴─────┐
+│ Client A │←→│ Client B │←→│ Client C │   client ring
+│ (cache)  │  │ (cache)  │  │ (cache)  │   (domain-α)
+└──────────┘  └──────────┘  └──────────┘
+```
+
+Servers peer with each other, manage storage, relay CRDT metadata
+(hub-and-spoke), and track their clients. Clients authenticate into
+the domain, then peer with other clients in that domain.
+
+**Client configuration:**
+- Server address(es)
+- Replica ID
+- Authentication credentials for domain
+
+**Server configuration:**
+- Replica ID
+- Role: `server`
+- Security domain token
+- Replication parameters (replica count, etc.)
+- Re-authentication timeout
+
+**Client wiring:**
+`CachingStore(FSBlockStore, ServerBlockStore)` + `ServerTransport`
+
+**Server wiring:**
+`FSBlockStore (or operator's choice)` + `ServerTransport`
 
 ## Architecture
 
-The shared core is identical in both modes. Mode selection determines
-which `BlockStore` and `MetadataTransport` implementations are wired in
-at startup.
+The shared core is identical in all configurations. Node role
+determines which `BlockStore` and `MetadataTransport` implementations
+are wired in at startup.
 
 ```
 ┌─────────────────────────────────────────┐
@@ -36,31 +158,21 @@ at startup.
 │ CachingStore  │                         │
 │ ServerBlock*  │                         │
 └───────────────┴─────────────────────────┘
-
-P2P wiring:
-  CachingStore(FSBlockStore, S3BlockStore) + S3Transport
-
-Client-server client wiring:
-  CachingStore(FSBlockStore, ServerBlockStore) + ServerTransport
-
-Client-server server wiring:
-  FSBlockStore (or operator's choice) + ServerTransport
 ```
 
-## Configuration
+### Ring Scoping
 
-Single binary, mode selected at startup.
+Rings are scoped to security domains and node roles:
 
-**P2P mode requires:**
-- S3 bucket (shared block store + metadata channel)
-- Replica ID (self-assigned)
-- Local cache path + size limit
+- **Server ring**: one per security domain. Servers in the domain peer
+  and replicate all metadata + blocks among themselves.
+- **Client ring**: one per security domain. Clients in the domain peer
+  and replicate metadata. Blocks are fetched from servers or S3.
+- In pure P2P mode, there is only a client ring. There is no server ring.
 
-**Client-server mode requires:**
-- Server address(es)
-- Replica ID
-- Role: `client` or `server`
-- Server-only: replication parameters (replica count, etc.)
+GC dominance is checked within the appropriate ring. A server checks
+dominance against the server ring. A client checks dominance against
+the client ring. The rings are independent.
 
 ## MetadataTransport Interface
 
@@ -88,6 +200,9 @@ type MetadataTransport interface {
   "check everything when you check anything" piggybacking model.
 - No ordering guarantee. CRDT merge is idempotent and commutative.
 - No acknowledgment protocol. Re-delivery is safe.
+
+The transport is domain-scoped: a transport instance only sees deltas
+from peers in its security domain.
 
 ## S3Transport (P2P Mode)
 
@@ -182,10 +297,14 @@ hub-and-spoke path is always the fallback.
 
 ### Server Role
 
-The server is a ring member. It participates in CRDT merge like any
-other replica. Its special authority is operational:
+The server is a member of the server ring. It participates in CRDT
+merge like any other server replica. It also observes and tracks
+clients in its domain, but does not join the client ring.
+
+Its special authority is operational:
+- Security domain management (token, authentication, re-auth timeout)
 - Replication parameters (target replica count, cache budget hints)
-- Cluster topology (registered clients, last-seen activity)
+- Client tracking (registered clients, last-seen activity)
 
 These are operational concerns, not CRDT state. Simple server-local
 configuration, not replicated.
@@ -227,23 +346,26 @@ deliberate: the piggybacking requirement means block I/O and metadata
 sync must be coordinated. Separating them would require the caller to
 manually coordinate, defeating the piggybacking mechanism.
 
-## GC Across Modes
+## GC Across Configurations
 
-GC safety (dominance check) works identically in both modes. The CRDT
-algebra is transport-agnostic. The operational path to achieving
-dominance differs.
+GC safety (dominance check) works identically in all configurations.
+The CRDT algebra is transport-agnostic. The operational path to
+achieving dominance differs.
 
-**P2P mode:**
+**Pure P2P (client ring):**
 - Any client can run GC.
+- Dominance checked against the client ring.
 - Dominance achieved proportional to sync frequency (piggybacking).
 - Partitioned clients stall GC -- dominance fails. Correct behavior.
 - Staleness detection via StalenessTracker: a Receive() that shows
   no new seq for a peer bumps its staleness count.
 
-**Client-server mode:**
-- Server sees all deltas (hub-and-spoke), achieves dominance fastest.
+**Client-server (server ring + client ring):**
+- Server checks dominance against the server ring. Sees all client
+  deltas (hub-and-spoke), achieves dominance fastest.
 - Servers are the most likely GC executors.
-- Clients can run GC but achieve dominance more slowly.
+- Clients check dominance against the client ring. Achievable but
+  slower — deltas are relayed through the server.
 - Same StalenessTracker mechanism; server's sync frequency is higher.
 
 **Unchanged:** DominatesRing, GC sweep logic, the safety invariant
@@ -251,15 +373,16 @@ dominance differs.
 
 ## New Components
 
-| Component          | Used in                  | Purpose                                    |
-|--------------------|--------------------------|--------------------------------------------|
-| `MetadataTransport`| Both (interface)         | Delta exchange abstraction                 |
-| `S3BlockStore`     | P2P only                 | BlockStore backed by S3                    |
-| `S3Transport`      | P2P only                 | MetadataTransport over S3 objects          |
-| `ServerBlockStore` | Client-server clients    | BlockStore that fetches from server        |
-| `ServerTransport`  | Client-server only       | MetadataTransport via server relay         |
-| `CachingStore`     | Both                     | Local cache + remote backend + piggybacking|
-| `Config`           | Both                     | Mode selection, implementation wiring      |
+| Component           | Used in                  | Purpose                                    |
+|---------------------|--------------------------|--------------------------------------------|
+| `MetadataTransport` | Both (interface)         | Delta exchange abstraction                 |
+| `S3BlockStore`      | P2P only                 | BlockStore backed by S3                    |
+| `S3Transport`       | P2P only                 | MetadataTransport over S3 objects          |
+| `ServerBlockStore`  | Client-server clients    | BlockStore that fetches from server        |
+| `ServerTransport`   | Client-server only       | MetadataTransport via server relay         |
+| `CachingStore`      | Both                     | Local cache + remote backend + piggybacking|
+| `SecurityDomain`    | Both                     | Domain identity + authentication           |
+| `Config`            | Both                     | Role selection, implementation wiring      |
 
 ## Unchanged Components
 
