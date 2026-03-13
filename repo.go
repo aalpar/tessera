@@ -2,8 +2,10 @@ package tessera
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -77,6 +79,58 @@ func (r *Repo) List() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// Backup stores data from r under name.
+// If name already exists, the previous version's block refs are removed
+// so old unique blocks become candidates for GC.
+func (repo *Repo) Backup(ctx context.Context, name string, r io.Reader) error {
+	if oldHash, ok := repo.recipes[name]; ok {
+		recipeData, err := repo.store.Get(ctx, oldHash)
+		if err != nil {
+			return fmt.Errorf("backup %s: load old recipe: %w", name, err)
+		}
+		oldRecipe, err := DeserializeSnapshotRecipe(name, recipeData)
+		if err != nil {
+			return fmt.Errorf("backup %s: parse old recipe: %w", name, err)
+		}
+		// Collect all hashes registered by WriteSnapshot: data blocks + recipe block.
+		oldHashes := make([]string, len(oldRecipe.Blocks)+1)
+		for i, b := range oldRecipe.Blocks {
+			oldHashes[i] = b.Hash
+		}
+		oldHashes[len(oldRecipe.Blocks)] = oldRecipe.Version
+		repo.index.RemoveFileRefs(name, oldHashes)
+	}
+
+	chunker := NewChunker(DefaultChunkerConfig())
+	recipe, _, err := WriteSnapshot(ctx, name, r, chunker, repo.store, repo.index)
+	if err != nil {
+		return fmt.Errorf("backup %s: %w", name, err)
+	}
+	repo.recipes[name] = recipe.Version
+	return nil
+}
+
+// Restore returns the data for the named backup.
+func (repo *Repo) Restore(ctx context.Context, name string) ([]byte, error) {
+	hash, ok := repo.recipes[name]
+	if !ok {
+		return nil, fmt.Errorf("no backup named %q", name)
+	}
+	recipeData, err := repo.store.Get(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("restore %s: load recipe: %w", name, err)
+	}
+	recipe, err := DeserializeSnapshotRecipe(name, recipeData)
+	if err != nil {
+		return nil, fmt.Errorf("restore %s: parse recipe: %w", name, err)
+	}
+	data, err := ReadSnapshot(ctx, recipe, repo.store)
+	if err != nil {
+		return nil, fmt.Errorf("restore %s: %w", name, err)
+	}
+	return data, nil
 }
 
 func loadIndex(path string) (*BlockRef, error) {
