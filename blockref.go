@@ -91,6 +91,10 @@ func (b *BlockRef) Refs(contentHash string) []string {
 }
 
 // UnreferencedBlocks returns content hashes with no remaining references.
+//
+// This only finds keys still present in the ORMap. Keys removed via
+// Merge (delta replication) are cleaned up by the ORMap and will not
+// appear here. For GC, use Sweep with a BlockStore instead.
 func (b *BlockRef) UnreferencedBlocks() []string {
 	var unreferenced []string
 	for _, key := range b.inner.Keys() {

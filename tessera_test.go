@@ -82,7 +82,7 @@ func TestFileDeletionAndGC(t *testing.T) {
 		t.Error("GC should dominate when it has the worker's full context")
 	}
 
-	swept := Sweep(w.Index())
+	swept := w.Index().UnreferencedBlocks()
 	if !slices.Contains(swept, "H1") {
 		t.Errorf("expected H1 in swept blocks, got %v", swept)
 	}
@@ -160,7 +160,7 @@ func TestGCDominanceGate(t *testing.T) {
 	}
 
 	// All blocks are referenced, so sweep returns nothing.
-	swept := Sweep(gcIndex)
+	swept := gcIndex.UnreferencedBlocks()
 	if len(swept) != 0 {
 		t.Errorf("expected no swept blocks (all referenced), got %v", swept)
 	}
@@ -286,7 +286,14 @@ func TestEndToEndBackupDedupGC(t *testing.T) {
 		t.Fatal("GC should dominate after seeing all worker events")
 	}
 
-	swept := Sweep(gcIndex)
+	swept, err := Sweep(ctx, gcIndex, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(swept) == 0 {
+		t.Fatal("expected unreferenced blocks to be swept after fileA deletion")
+	}
 
 	// Blocks unique to fileA should be swept.
 	// Shared blocks should NOT be swept (still referenced by fileB).

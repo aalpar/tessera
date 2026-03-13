@@ -46,7 +46,7 @@ func TestGCWithRingMembership(t *testing.T) {
 	}
 
 	// Sweep from worker-1's local index (which retains the empty H1 entry).
-	swept := Sweep(w1.Index())
+	swept := w1.Index().UnreferencedBlocks()
 	if len(swept) != 1 || swept[0] != "H1" {
 		t.Fatalf("expected [H1] swept, got %v", swept)
 	}
@@ -127,7 +127,7 @@ func TestGCAfterEviction(t *testing.T) {
 	}
 
 	// Sweep from worker-1's local index.
-	swept := Sweep(w1.Index())
+	swept := w1.Index().UnreferencedBlocks()
 	if len(swept) != 1 || swept[0] != "H1" {
 		t.Fatalf("expected [H1] swept after eviction, got %v", swept)
 	}
