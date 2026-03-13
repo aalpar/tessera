@@ -133,6 +133,32 @@ func (repo *Repo) Restore(ctx context.Context, name string) ([]byte, error) {
 	return data, nil
 }
 
+// GC sweeps unreferenced blocks from the store.
+// Returns the number of blocks deleted.
+func (repo *Repo) GC(ctx context.Context) (int, error) {
+	swept, err := Sweep(ctx, repo.index, repo.store)
+	if err != nil {
+		return 0, fmt.Errorf("gc: %w", err)
+	}
+	for _, hash := range swept {
+		if err := repo.store.Delete(ctx, hash); err != nil {
+			return 0, fmt.Errorf("gc: delete %s: %w", hash, err)
+		}
+	}
+	return len(swept), nil
+}
+
+// Status returns total block count and unreferenced block count.
+// Single-node only: uses UnreferencedBlocks() which is correct when
+// all mutations are local (Apply path).
+func (repo *Repo) Status(ctx context.Context) (total, unreferenced int, err error) {
+	all, err := repo.store.List(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("status: %w", err)
+	}
+	return len(all), len(repo.index.UnreferencedBlocks()), nil
+}
+
 func loadIndex(path string) (*BlockRef, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {

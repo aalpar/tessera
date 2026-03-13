@@ -73,3 +73,65 @@ func TestRepoInitOpen(t *testing.T) {
 		t.Fatalf("expected empty recipes, got %v", repo.List())
 	}
 }
+
+func TestRepoGC(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	if err := InitRepo(dir); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := OpenRepo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Back up v1.
+	v1 := bytes.Repeat([]byte("version-one-data "), 512)
+	if err := repo.Backup(ctx, "file.txt", bytes.NewReader(v1)); err != nil {
+		t.Fatal(err)
+	}
+
+	total, unref, err := repo.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total == 0 {
+		t.Fatal("expected blocks after backup")
+	}
+	if unref != 0 {
+		t.Fatalf("expected 0 unreferenced after backup, got %d", unref)
+	}
+
+	// Back up v2 (completely different data — v1 blocks become unreferenced).
+	v2 := bytes.Repeat([]byte("version-two-data! "), 512)
+	if err := repo.Backup(ctx, "file.txt", bytes.NewReader(v2)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, unref, err = repo.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unref == 0 {
+		t.Fatal("expected unreferenced blocks after overwrite")
+	}
+
+	// GC sweeps them.
+	n, err := repo.GC(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("expected GC to sweep blocks")
+	}
+
+	// Restore returns v2.
+	got, err := repo.Restore(ctx, "file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, v2) {
+		t.Fatal("restore after GC returned wrong data")
+	}
+}
