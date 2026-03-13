@@ -1,6 +1,8 @@
 # GC Sweep After Merge Fix
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+>
+> **Status: ✓ Complete**
 
 **Goal:** Fix `Sweep` so it finds unreferenced blocks regardless of whether the deletion was learned via local `Apply` or remote `Merge`.
 
