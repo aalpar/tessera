@@ -30,7 +30,7 @@
   - `StalenessTracker` — replication-piggybacked liveness detection
   - `DominatesRing` — ring-aware GC dominance check
   - Any peer can evict; add-wins handles false positives
-- [ ] GC sweep after merge — `UnreferencedBlocks()` misses blocks whose references were only removed through merges (`ORMap.Apply` retains empty keys, `ORMap.Merge` cleans them up). Fix via BlockStore `List` method or independent "known blocks" tracking.
+- [x] GC sweep after merge — Sweep uses BlockStore.List instead of UnreferencedBlocks
 - [ ] Checkpoint + truncate — snapshot full state, discard old deltas
 - [ ] S3 BlockStore backend
 - [ ] Cross-geo replication layer
