@@ -2,7 +2,9 @@ package tessera
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +81,9 @@ func (r *Repo) List() map[string]string {
 
 func loadIndex(path string) (*BlockRef, error) {
 	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return New("local"), nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +120,7 @@ func saveIndex(path string, index *BlockRef) error {
 func loadRecipes(path string) (map[string]string, error) {
 	recipes := make(map[string]string)
 	f, err := os.Open(path)
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return recipes, nil
 	}
 	if err != nil {
