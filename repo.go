@@ -135,6 +135,7 @@ func (repo *Repo) Restore(ctx context.Context, name string) ([]byte, error) {
 
 // GC sweeps unreferenced blocks from the store.
 // Returns the number of blocks deleted.
+// The caller must call Save after GC to persist the updated index.
 func (repo *Repo) GC(ctx context.Context) (int, error) {
 	swept, err := Sweep(ctx, repo.index, repo.store)
 	if err != nil {

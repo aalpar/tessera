@@ -126,6 +126,22 @@ func TestRepoGC(t *testing.T) {
 		t.Fatal("expected GC to sweep blocks")
 	}
 
+	// Persist and reload — verify GC state survives across Save/OpenRepo.
+	if err := repo.Save(); err != nil {
+		t.Fatal(err)
+	}
+	repo2, err := OpenRepo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, unref2, err := repo2.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unref2 != 0 {
+		t.Fatalf("expected 0 unreferenced after GC+Save, got %d", unref2)
+	}
+
 	// Restore returns v2.
 	got, err := repo.Restore(ctx, "file.txt")
 	if err != nil {
