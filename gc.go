@@ -1,6 +1,9 @@
 package tessera
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/aalpar/crdt/dotcontext"
 )
 
@@ -50,7 +53,20 @@ func DominatesRing(gcCtx *dotcontext.CausalContext, ring *Ring, memberCtxs map[s
 }
 
 // Sweep returns content hashes that are safe to delete from storage.
+// It enumerates all blocks in the store and checks each against the
+// BlockRef index. Blocks with no remaining references are candidates
+// for deletion.
 // The caller must verify Dominates() before calling Sweep.
-func Sweep(index *BlockRef) []string {
-	return index.UnreferencedBlocks()
+func Sweep(ctx context.Context, index *BlockRef, store BlockStore) ([]string, error) {
+	allBlocks, err := store.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gc sweep: %w", err)
+	}
+	var unreferenced []string
+	for _, hash := range allBlocks {
+		if !index.IsReferenced(hash) {
+			unreferenced = append(unreferenced, hash)
+		}
+	}
+	return unreferenced, nil
 }
