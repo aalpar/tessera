@@ -3,6 +3,7 @@ package tessera
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -149,5 +150,55 @@ func TestBlockStoreConcurrentPut(t *testing.T) {
 	}
 	if string(got) != string(data) {
 		t.Fatalf("got %q, want %q", got, data)
+	}
+}
+
+func TestFSBlockStoreList(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewFSBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty store returns nothing.
+	hashes, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 0 {
+		t.Fatalf("expected empty list, got %v", hashes)
+	}
+
+	// Store two blocks in different shards.
+	want := []string{
+		"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		"ff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+	}
+	for _, h := range want {
+		if err := store.Put(ctx, h, []byte("data-"+h)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hashes, err = store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(hashes)
+	slices.Sort(want)
+	if !slices.Equal(hashes, want) {
+		t.Fatalf("List() = %v, want %v", hashes, want)
+	}
+
+	// Delete one block, verify it disappears from List.
+	if err := store.Delete(ctx, want[0]); err != nil {
+		t.Fatal(err)
+	}
+	hashes, err = store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 1 || hashes[0] != want[1] {
+		t.Fatalf("after delete: List() = %v, want [%s]", hashes, want[1])
 	}
 }

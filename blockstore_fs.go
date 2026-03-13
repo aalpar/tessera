@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // FSBlockStore stores content-addressed blocks as files on the local filesystem.
@@ -100,6 +101,31 @@ func (s *FSBlockStore) Has(_ context.Context, hash string) (bool, error) {
 		return false, fmt.Errorf("blockstore has %s: %w", hash, err)
 	}
 	return true, nil
+}
+
+func (s *FSBlockStore) List(_ context.Context) ([]string, error) {
+	var hashes []string
+	shards, err := os.ReadDir(s.root)
+	if err != nil {
+		return nil, fmt.Errorf("blockstore list: read root: %w", err)
+	}
+	for _, shard := range shards {
+		if !shard.IsDir() || len(shard.Name()) != 2 {
+			continue
+		}
+		prefix := shard.Name()
+		files, err := os.ReadDir(filepath.Join(s.root, prefix))
+		if err != nil {
+			return nil, fmt.Errorf("blockstore list: read shard %s: %w", prefix, err)
+		}
+		for _, f := range files {
+			if f.IsDir() || strings.HasPrefix(f.Name(), ".tmp-") {
+				continue
+			}
+			hashes = append(hashes, prefix+f.Name())
+		}
+	}
+	return hashes, nil
 }
 
 // ErrBlockNotFound is returned when a requested block does not exist.
