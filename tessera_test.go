@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"slices"
 	"testing"
 
@@ -384,5 +386,55 @@ func TestEndToEndAppendStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("block %s not found in store: %v", hash, err)
 		}
+	}
+}
+
+// TestSweepAfterMerge verifies that GC correctly identifies unreferenced
+// blocks even when the deletion was learned via Merge (not local Apply).
+//
+// This is a regression test: ORMap.Merge cleans up empty keys, so
+// UnreferencedBlocks() would return nothing. Sweep uses BlockStore.List
+// to find blocks that exist in storage but have no references.
+func TestSweepAfterMerge(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewFSBlockStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker backs up file-A referencing one block.
+	w := NewWorker("worker-1")
+	data := []byte("block-data-for-merge-test")
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+	if err := store.Put(ctx, hash, data); err != nil {
+		t.Fatal(err)
+	}
+	addDeltas := w.BackupFile("file-A", []string{hash})
+
+	// Worker deletes file-A.
+	removeDeltas := w.DeleteFile("file-A", []string{hash})
+
+	// GC node receives everything via Merge (never calls Apply).
+	gcIndex := New("gc")
+	for _, d := range addDeltas {
+		gcIndex.Merge(d)
+	}
+	for _, d := range removeDeltas {
+		gcIndex.Merge(d)
+	}
+
+	// Verify the ORMap bug: UnreferencedBlocks sees nothing.
+	if ub := gcIndex.UnreferencedBlocks(); len(ub) != 0 {
+		t.Fatalf("expected UnreferencedBlocks()=[] after merge cleanup, got %v", ub)
+	}
+
+	// Sweep using store.List finds the unreferenced block.
+	swept, err := Sweep(ctx, gcIndex, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(swept) != 1 || swept[0] != hash {
+		t.Fatalf("expected [%s] swept, got %v", hash, swept)
 	}
 }
